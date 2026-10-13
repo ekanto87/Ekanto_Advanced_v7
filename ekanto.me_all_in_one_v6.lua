@@ -168,6 +168,9 @@ local DEFAULT_CONFIG = {
     -- v5 settings
     theme = "Neon", uiScale = 100, toasts = true, hud = false, hopMax = 8,
     font = "Clean", textBoost = 1,
+    -- performance caps
+    renderLevel = 0, fpsCap = 0, animCap = 0, viewDist = 0,
+    liteUI = false, perfGuard = false, guardFps = 30,
     panelW = PANEL_SIZE.X.Offset, panelH = PANEL_SIZE.Y.Offset,
     keys = { toggleUI = "RightControl", minimize = "M", fly = "F", noclip = "N", search = "Backquote" },
     profiles = {},
@@ -722,6 +725,13 @@ local function applyConfigData(data)
     end
     if type(data.textBoost) == "number" then Cfg.textBoost = math.clamp(math.floor(data.textBoost + 0.5), 0, 4) end
     if type(data.verifiedAt) == "number" then Cfg.verifiedAt = data.verifiedAt end
+    if type(data.renderLevel) == "number" then Cfg.renderLevel = math.clamp(math.floor(data.renderLevel + 0.5), 0, 10) end
+    if type(data.fpsCap) == "number" then Cfg.fpsCap = math.clamp(math.floor(data.fpsCap + 0.5), 0, 240) end
+    if type(data.animCap) == "number" then Cfg.animCap = math.clamp(math.floor(data.animCap + 0.5), 0, 500) end
+    if type(data.viewDist) == "number" then Cfg.viewDist = math.clamp(math.floor(data.viewDist + 0.5), 0, 5000) end
+    if type(data.liteUI) == "boolean" then Cfg.liteUI = data.liteUI end
+    if type(data.perfGuard) == "boolean" then Cfg.perfGuard = data.perfGuard end
+    if type(data.guardFps) == "number" then Cfg.guardFps = math.clamp(math.floor(data.guardFps + 0.5), 15, 60) end
     if type(data.hopMax) == "number" then Cfg.hopMax = math.clamp(math.floor(data.hopMax + 0.5), 1, 30) end
     if type(data.panelW) == "number" then Cfg.panelW = math.clamp(math.floor(data.panelW), 420, 900) end
     if type(data.panelH) == "number" then Cfg.panelH = math.clamp(math.floor(data.panelH), 320, 760) end
@@ -1484,7 +1494,7 @@ end
 -- ---------- 6h. Environment ----------
 local Optimizer = {
     saved = setmetatable({}, { __mode = "k" }),
-    conn = nil, token = 0, lighting = nil, quality = nil,
+    conn = nil, token = 0, lighting = nil, mesh = nil, terrain = nil,
 }
 
 local function optimizeInstance(inst)
@@ -1499,15 +1509,20 @@ local function optimizeInstance(inst)
         elseif inst:IsA("BasePart") then
             if LocalPlayer.Character and inst:IsDescendantOf(LocalPlayer.Character) then return end
             if Optimizer.saved[inst] == nil then
-                Optimizer.saved[inst] = { mat = inst.Material, refl = inst.Reflectance, shadow = inst.CastShadow }
+                Optimizer.saved[inst] = { mat = inst.Material, refl = inst.Reflectance, shadow = inst.CastShadow,
+                    fid = inst:IsA("MeshPart") and inst.RenderFidelity or nil }
             end
             inst.Material = Enum.Material.SmoothPlastic
             inst.Reflectance = 0
             inst.CastShadow = false
+            if inst:IsA("MeshPart") then inst.RenderFidelity = Enum.RenderFidelity.Performance end
         elseif inst:IsA("Decal") or inst:IsA("Texture") then
             if LocalPlayer.Character and inst:IsDescendantOf(LocalPlayer.Character) then return end
             if Optimizer.saved[inst] == nil then Optimizer.saved[inst] = { t = inst.Transparency } end
             inst.Transparency = 1
+        elseif inst:IsA("Light") then
+            if Optimizer.saved[inst] == nil then Optimizer.saved[inst] = { lightShadows = inst.Shadows } end
+            inst.Shadows = false
         end
     end)
 end
@@ -1519,22 +1534,37 @@ function Optimizer.enable()
         Optimizer.lighting = Optimizer.lighting or { shadows = Lighting.GlobalShadows }
         Lighting.GlobalShadows = false
     end)
-    pcall(function()
-        local rendering = settings().Rendering
-        Optimizer.quality = Optimizer.quality or rendering.QualityLevel
-        rendering.QualityLevel = Enum.QualityLevel.Level01
+    pcall(function() -- lower mesh detail: far meshes switch to cheap versions but are still drawn
+        local r = settings().Rendering
+        if Optimizer.mesh == nil then Optimizer.mesh = r.MeshPartDetailLevel end
+        r.MeshPartDetailLevel = Enum.MeshPartDetailLevel.Level01
+    end)
+    pcall(function() -- terrain water effects and grass decoration are expensive on weak GPUs
+        local t = workspace:FindFirstChildOfClass("Terrain")
+        if not t then return end
+        Optimizer.terrain = Optimizer.terrain or {}
+        local saved = Optimizer.terrain
+        local function put(prop, value)
+            pcall(function()
+                if saved[prop] == nil then saved[prop] = t[prop] end
+                t[prop] = value
+            end)
+        end
+        put("WaterWaveSize", 0)
+        put("WaterReflectance", 0)
+        put("Decoration", false)
     end)
     if Optimizer.conn then pcall(function() Optimizer.conn:Disconnect() end) end
     Optimizer.conn = workspace.DescendantAdded:Connect(optimizeInstance)
     task.spawn(function()
         pcall(function()
             for _, d in ipairs(Lighting:GetDescendants()) do optimizeInstance(d) end
-            local count = 0
+            local t0 = os.clock()
             for _, d in ipairs(workspace:GetDescendants()) do
                 if not Runtime.alive or Optimizer.token ~= myToken then return end
                 optimizeInstance(d)
-                count += 1
-                if count % 400 == 0 then task.wait() end
+                -- spend at most ~2.5 ms per frame so enabling it never causes a freeze
+                if os.clock() - t0 > 0.0025 then task.wait(); t0 = os.clock() end
             end
         end)
     end)
@@ -1543,7 +1573,7 @@ end
 function Optimizer.disable()
     Optimizer.token += 1
     if Optimizer.conn then pcall(function() Optimizer.conn:Disconnect() end); Optimizer.conn = nil end
-    local count = 0
+    local t0 = os.clock()
     for inst, data in pairs(Optimizer.saved) do
         pcall(function()
             if data.enabled ~= nil then inst.Enabled = data.enabled
@@ -1551,24 +1581,32 @@ function Optimizer.disable()
                 inst.Material = data.mat
                 inst.Reflectance = data.refl
                 inst.CastShadow = data.shadow
+                if data.fid ~= nil then inst.RenderFidelity = data.fid end
+            elseif data.lightShadows ~= nil then inst.Shadows = data.lightShadows
             elseif data.t ~= nil then inst.Transparency = data.t end
         end)
         Optimizer.saved[inst] = nil
-        count += 1
-        if count % 600 == 0 then task.wait() end
+        if os.clock() - t0 > 0.0025 then task.wait(); t0 = os.clock() end
     end
     pcall(function()
         if Optimizer.lighting then Lighting.GlobalShadows = Optimizer.lighting.shadows; Optimizer.lighting = nil end
     end)
     pcall(function()
-        if Optimizer.quality then
-            settings().Rendering.QualityLevel = Optimizer.quality
-            Optimizer.quality = nil
+        if Optimizer.mesh ~= nil then
+            settings().Rendering.MeshPartDetailLevel = Optimizer.mesh
+            Optimizer.mesh = nil
         end
+    end)
+    pcall(function()
+        local t = workspace:FindFirstChildOfClass("Terrain")
+        if t and Optimizer.terrain then
+            for prop, value in pairs(Optimizer.terrain) do pcall(function() t[prop] = value end) end
+        end
+        Optimizer.terrain = nil
     end)
 end
 
-local Env = { fog = nil, bright = nil }
+local Env = { fog = nil, bright = nil, far = nil, viewHandle = nil }
 
 local function getAtmosphere() return Lighting:FindFirstChildOfClass("Atmosphere") end
 
@@ -1595,9 +1633,12 @@ function Env.setFog(on)
         if on then
             if not Env.fog then
                 local atmo = getAtmosphere()
+                local far = Env.far -- if a view distance is active, the real originals live there
                 Env.fog = {
-                    fogStart = Lighting.FogStart, fogEnd = Lighting.FogEnd,
-                    density = atmo and atmo.Density, haze = atmo and atmo.Haze,
+                    fogStart = far and far.fogStart or Lighting.FogStart,
+                    fogEnd = far and far.fogEnd or Lighting.FogEnd,
+                    density = far and far.density or (atmo and atmo.Density),
+                    haze = far and far.haze or (atmo and atmo.Haze),
                 }
             end
             assertFog()
@@ -1634,11 +1675,201 @@ function Env.setBright(on)
     end)
 end
 
+-- View distance: pushes fog out to `v` studs and thins the atmosphere (cheap on the GPU).
+-- It cannot load parts the server streams out (StreamingEnabled games decide that server-side).
+function Env.assertView()
+    local far, v = Env.far, Cfg.viewDist or 0
+    if not far or v <= 0 then return end
+    pcall(function()
+        Lighting.FogEnd = math.max(far.fogEnd, v)
+        Lighting.FogStart = math.max(far.fogStart, v * 0.6)
+        local atmo = getAtmosphere()
+        if atmo and far.density then
+            local k = math.clamp(1500 / v, 0.02, 1) -- farther view = thinner haze
+            atmo.Density = far.density * k
+            atmo.Haze = (far.haze or 0) * k
+        end
+    end)
+end
+
+function Env.setView(v)
+    pcall(function()
+        if v > 0 then
+            if not Env.far then
+                local atmo = getAtmosphere()
+                Env.far = {
+                    fogStart = Lighting.FogStart, fogEnd = Lighting.FogEnd,
+                    density = atmo and atmo.Density, haze = atmo and atmo.Haze,
+                }
+            end
+            if not Cfg.noFog then Env.assertView() end
+            if not Env.viewHandle then
+                Env.viewHandle = Loop.register("View Distance", function()
+                    if (Cfg.viewDist or 0) > 0 and not Cfg.noFog then Env.assertView() end
+                end, { interval = 0.1, keep = true })
+            end
+        elseif Env.far then
+            local far = Env.far
+            Env.far = nil
+            if Env.viewHandle then Loop.remove(Env.viewHandle); Env.viewHandle = nil end
+            if not Cfg.noFog then
+                Lighting.FogStart = far.fogStart
+                Lighting.FogEnd = far.fogEnd
+                local atmo = getAtmosphere()
+                if atmo and far.density ~= nil then
+                    atmo.Density = far.density
+                    atmo.Haze = far.haze
+                end
+            end
+        end
+    end)
+end
+
 function Env.startLoop()
     Loop.register("Environment", function()
+        if (Cfg.viewDist or 0) > 0 and not Cfg.noFog then Env.assertView() end
         if Cfg.noFog then assertFog() end
         if Cfg.fullBright then assertBright() end
     end, { interval = 0.5, keep = true })
+end
+
+-- ---------- 6h-b. Performance caps ----------
+local Perf = {
+    origQuality = nil, origFps = nil, fpsWarned = false, notify = nil, -- notify is bound once Toast exists
+    anim = { animators = setmetatable({}, { __mode = "k" }), frozen = setmetatable({}, { __mode = "k" }),
+        handle = nil, conn = nil, token = 0 },
+}
+
+-- Render Quality Level: Roblox culls far / small objects at low quality levels, so a LOW level is what makes
+-- distant things disappear. 0 = leave the game's own setting; 1-10 = force that level (higher = farther).
+function Perf.applyQuality()
+    pcall(function()
+        local rendering = settings().Rendering
+        local want = ((Cfg.renderLevel or 0) > 0) and Cfg.renderLevel or nil
+        if want then
+            if Perf.origQuality == nil then Perf.origQuality = rendering.QualityLevel end
+            rendering.QualityLevel = Enum.QualityLevel[string.format("Level%02d", want)]
+        elseif Perf.origQuality ~= nil then
+            rendering.QualityLevel = Perf.origQuality
+            Perf.origQuality = nil
+        end
+    end)
+end
+
+-- FPS Cap: uses the executor's setfpscap. 0 = hand control back to whatever it was before.
+function Perf.applyFpsCap()
+    local v = Cfg.fpsCap or 0
+    if typeof(setfpscap) ~= "function" then
+        if v > 0 and not Perf.fpsWarned then
+            Perf.fpsWarned = true
+            if Perf.notify then Perf.notify("FPS cap isn't supported by this executor") end
+        end
+        return
+    end
+    if v > 0 then
+        if Perf.origFps == nil then
+            local cur = 60
+            if typeof(getfpscap) == "function" then
+                local ok, r = pcall(getfpscap)
+                if ok and type(r) == "number" then cur = r end
+            end
+            Perf.origFps = cur
+        end
+        pcall(setfpscap, math.max(20, v))
+    elseif Perf.origFps ~= nil then
+        pcall(setfpscap, Perf.origFps)
+        Perf.origFps = nil
+    end
+end
+
+-- Animation Distance Cap: characters farther than the cap have their playing animation tracks frozen
+-- locally (speed 0) and thawed when you get close again. Local only; how well it holds depends on the game.
+local function trackAnimator(inst)
+    if inst:IsA("Animator") then Perf.anim.animators[inst] = true end
+end
+
+function Perf.animThaw(animator)
+    local list = Perf.anim.frozen[animator]
+    if not list then return end
+    for track, spd in pairs(list) do pcall(function() track:AdjustSpeed(spd) end) end
+    Perf.anim.frozen[animator] = nil
+end
+
+function Perf.animStep()
+    local dist = Cfg.animCap or 0
+    if dist <= 0 then return end
+    local char, _, hrp = getCharacterParts()
+    if not hrp then return end
+    local origin = hrp.Position
+    for animator in pairs(Perf.anim.animators) do
+        if not animator.Parent then
+            Perf.anim.animators[animator] = nil
+            Perf.anim.frozen[animator] = nil
+        else
+            pcall(function()
+                local model = animator:FindFirstAncestorOfClass("Model")
+                if not model or model == char then return end
+                local root = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
+                if not root then return end
+                if (root.Position - origin).Magnitude > dist then
+                    local list = Perf.anim.frozen[animator]
+                    if not list then list = {}; Perf.anim.frozen[animator] = list end
+                    for _, track in ipairs(animator:GetPlayingAnimationTracks()) do
+                        if list[track] == nil then list[track] = track.Speed end
+                        if track.Speed ~= 0 then track:AdjustSpeed(0) end
+                    end
+                else
+                    Perf.animThaw(animator)
+                end
+            end)
+        end
+    end
+end
+
+function Perf.animStart()
+    local a = Perf.anim
+    if a.handle then return end
+    a.token += 1
+    local tok = a.token
+    a.conn = workspace.DescendantAdded:Connect(function(d) pcall(trackAnimator, d) end)
+    task.spawn(function()
+        local n = 0
+        for _, d in ipairs(workspace:GetDescendants()) do
+            if not Runtime.alive or a.token ~= tok then return end
+            pcall(trackAnimator, d)
+            n += 1
+            if n % 500 == 0 then task.wait() end
+        end
+    end)
+    a.handle = Loop.register("Animation Cap", Perf.animStep, { interval = 0.4, keep = true })
+end
+
+function Perf.animStop()
+    local a = Perf.anim
+    a.token += 1
+    if a.conn then pcall(function() a.conn:Disconnect() end); a.conn = nil end
+    if a.handle then Loop.remove(a.handle); a.handle = nil end
+    for animator in pairs(a.frozen) do Perf.animThaw(animator) end
+    table.clear(a.frozen)
+end
+
+function Perf.applyAnim()
+    if (Cfg.animCap or 0) > 0 then Perf.animStart() else Perf.animStop() end
+end
+
+function Perf.restoreAll()
+    pcall(function()
+        if Perf.origQuality ~= nil then
+            settings().Rendering.QualityLevel = Perf.origQuality
+            Perf.origQuality = nil
+        end
+    end)
+    if Perf.origFps ~= nil and typeof(setfpscap) == "function" then
+        pcall(setfpscap, Perf.origFps)
+        Perf.origFps = nil
+    end
+    pcall(Perf.animStop)
+    pcall(Env.setView, 0)
 end
 
 -- ---------- 6i. Feature setters ----------
@@ -1673,6 +1904,7 @@ end
 function Features.optimizer(on)
     Cfg.optimizer = on
     if on then Optimizer.enable() else task.spawn(Optimizer.disable) end
+    Perf.applyQuality()
 end
 
 function Features.noFog(on)
@@ -1808,6 +2040,7 @@ local function fullCleanup()
     pcall(Invis.restore)
     pcall(Env.setFog, false)
     pcall(Env.setBright, false)
+    pcall(Perf.restoreAll)
     task.spawn(function() pcall(Optimizer.disable) end)
     for _, k in ipairs(TOGGLE_KEYS) do Cfg[k] = false end
 end
@@ -2380,6 +2613,9 @@ end
 local function applyConfigToUI()
     UI.sliders.speed.Set(Cfg.speed)
     UI.sliders.flySpeed.Set(Cfg.flySpeed)
+    for _, key in ipairs({ "renderLevel", "fpsCap", "animCap", "viewDist" }) do
+        pcall(function() UI.sliders[key].Set(Cfg[key]) end)
+    end
     for _, k in ipairs(TOGGLE_KEYS) do
         UI.toggles[k].Set(Cfg[k] and PASSIVE_RESTORE[k] == true, true)
     end
@@ -2646,8 +2882,8 @@ local function buildMain()
     -- ---------- Performance ----------
     createToggle(perfPage, {
         key = "optimizer", name = "Graphics & Animation Optimizer",
-        desc = "Less effects, flat materials, low quality",
-        tip = "Disables particles/trails/beams/post effects, flattens materials, hides decals, lowers render quality. Restored when off.",
+        desc = "Less effects, flat materials, cheaper meshes",
+        tip = "Disables particles/trails/beams/post effects, flattens materials, hides decals, turns off light shadows, lowers mesh detail and terrain water/grass. It does NOT lower the render quality level, so far objects stay visible. Restored when off.",
         accent = Theme.Green,
         callback = featureCallback("FPS Optimizer", Features.optimizer),
     })
@@ -2665,6 +2901,101 @@ local function buildMain()
         accent = Theme.Green,
         callback = featureCallback("Full Bright", Features.fullBright),
     })
+    Perf.notify = function(msg) Toast.show(msg, Theme.Red, 3) end
+    createSlider(perfPage, {
+        key = "renderLevel", name = "Render Quality Level", desc = "0 = game setting • higher draws farther",
+        tip = "Roblox hides far and small objects at low quality levels, so a high level lets you see farther. Turn on the Graphics Optimizer to keep it light: it cuts shadows, effects, textures and mesh detail without lowering this level. Raise it step by step until your laptop starts to struggle.",
+        min = 0, max = 10, value = Cfg.renderLevel, accent = Theme.Cyan,
+        onChange = function(v) Cfg.renderLevel = v; Perf.applyQuality(); scheduleSave() end,
+    })
+    createSlider(perfPage, {
+        key = "fpsCap", name = "FPS Cap", desc = "Limit frame rate • 0 = leave as is • 20 - 240",
+        tip = "Uses your executor's setfpscap. A lower cap saves GPU, heat and battery. 0 gives control back to the previous cap. Needs an executor that supports setfpscap.",
+        min = 0, max = 240, value = Cfg.fpsCap, accent = Theme.Green,
+        onChange = function(v) Cfg.fpsCap = v; Perf.applyFpsCap(); scheduleSave() end,
+    })
+    createSlider(perfPage, {
+        key = "animCap", name = "Animation Distance Cap", desc = "Freeze far characters' animations • 0 = off",
+        tip = "Characters farther than this many studs stop animating on your screen only, which cuts animation cost in crowded places. They resume when you get close. Results depend on the game.",
+        min = 0, max = 500, value = Cfg.animCap, accent = Theme.Cyan,
+        onChange = function(v) Cfg.animCap = v; Perf.applyAnim(); scheduleSave() end,
+    })
+    createSlider(perfPage, {
+        key = "viewDist", name = "View Distance", desc = "Fog / detail range in studs • 0 = game default",
+        tip = "Pushes fog out to this distance, thins the atmosphere and keeps mesh detail high far away. It can't load parts that the server streams out in StreamingEnabled games. Remove Fog overrides it.",
+        min = 0, max = 5000, value = Cfg.viewDist, accent = Theme.Green,
+        onChange = function(v) Cfg.viewDist = v; Env.setView(v); scheduleSave() end,
+    })
+    pcall(function()
+        local streaming = workspace.StreamingEnabled
+        if streaming then
+            createInfo(perfPage, "This game uses world streaming (target radius about "
+                .. math.floor(workspace.StreamingTargetRadius) .. " studs). The server decides what gets loaded, so parts beyond that never reach your screen and no view-distance setting can show them.", Theme.Off)
+        else
+            createInfo(perfPage, "This game does not stream the world, so View Distance and Remove Fog fully control how far you can see.", Theme.Off)
+        end
+    end)
+
+    -- frame-drop helpers
+    createToggle(perfPage, {
+        key = "liteUI", name = "Lite Panel Mode", desc = "Stops the panel's animated borders",
+        tip = "The neon borders re-draw every frame. Lite mode freezes them, so the panel itself costs almost nothing. Helps on weak laptops, especially if the panel stays open.",
+        accent = Theme.Cyan,
+        callback = function(on)
+            Cfg.liteUI = on and true or false
+            if Cfg.liteUI then
+                for _, g in ipairs(animatedGradients) do pcall(function() g.Rotation = 45 end) end
+            end
+            scheduleSave()
+        end,
+    })
+    createToggle(perfPage, {
+        key = "perfGuard", name = "Performance Guard", desc = "Auto optimizer when FPS drops",
+        tip = "Watches your FPS. If it stays under the threshold for 5 seconds it turns the Graphics Optimizer on by itself, and turns it off again once FPS has been healthy for 20 seconds. It never touches Render Quality Level, so far objects stay visible.",
+        accent = Theme.Green,
+        callback = function(on) Cfg.perfGuard = on and true or false; scheduleSave() end,
+    })
+    createSlider(perfPage, {
+        key = "guardFps", name = "Guard Threshold", desc = "Turn the optimizer on below this FPS • 15 - 60",
+        tip = "Performance Guard reacts when your FPS stays below this number.",
+        min = 15, max = 60, value = Cfg.guardFps, accent = Theme.Green,
+        onChange = function(v) Cfg.guardFps = v; scheduleSave() end,
+    })
+    UI.toggles.liteUI.Set(Cfg.liteUI == true, true)
+    UI.toggles.perfGuard.Set(Cfg.perfGuard == true, true)
+
+    local Guard = { acc = 0, frames = 0, low = 0, ok = 0, engaged = false }
+    Loop.register("Performance Guard", function(dt)
+        if dt > 0.5 then Guard.acc, Guard.frames = 0, 0 return end -- alt-tab / loading hitch, not real FPS
+        Guard.acc += dt
+        Guard.frames += 1
+        if Guard.acc < 1 then return end
+        local fps = Guard.frames / Guard.acc
+        Guard.acc, Guard.frames = 0, 0
+        if not Cfg.perfGuard then Guard.low, Guard.ok, Guard.engaged = 0, 0, false return end
+        local thr = Cfg.guardFps or 30
+        if Guard.engaged and not Cfg.optimizer then Guard.engaged = false end -- you switched it off yourself
+        if not Guard.engaged then
+            Guard.ok = 0
+            if fps < thr then Guard.low += 1 else Guard.low = 0 end
+            if Guard.low >= 5 then
+                Guard.low = 0
+                if not Cfg.optimizer then
+                    Guard.engaged = true
+                    UI.toggles.optimizer.Set(true, false)
+                    Toast.show("Performance Guard: FPS stayed under " .. thr .. ", optimizer turned on", Theme.Cyan, 4)
+                end
+            end
+        else
+            Guard.low = 0
+            if fps > thr + 15 then Guard.ok += 1 else Guard.ok = 0 end
+            if Guard.ok >= 20 then
+                Guard.ok, Guard.engaged = 0, false
+                UI.toggles.optimizer.Set(false, false)
+                Toast.show("Performance Guard: FPS recovered, optimizer turned off", Theme.Cyan, 4)
+            end
+        end
+    end, { keep = true })
 
     -- ============================================================
     -- EXTRAS (v5): themes, search, profiles, keybinds, HUD, resize
@@ -3626,6 +3957,13 @@ local function buildMain()
         pcall(function() UI.sliders.flySpeed.Set(DEFAULT_CONFIG.flySpeed) end)
         pcall(function() UI.sliders.uiScale.Set(100) end)
         pcall(function() UI.sliders.hopMax.Set(8) end)
+        pcall(function() UI.sliders.renderLevel.Set(0) end)
+        pcall(function() UI.sliders.fpsCap.Set(0) end)
+        pcall(function() UI.sliders.animCap.Set(0) end)
+        pcall(function() UI.sliders.viewDist.Set(0) end)
+        pcall(function() UI.toggles.liteUI.Set(false, true) end)
+        pcall(function() UI.toggles.perfGuard.Set(false, true) end)
+        pcall(function() UI.sliders.guardFps.Set(30) end)
         pcall(function() UI.sliders.volume.Set(40) end)
         Cfg.font = "Clean"
         Theme.Font = fontPreset("Clean").font
@@ -4507,6 +4845,10 @@ do
     local t = 0
     Loop.register("Visuals", function(dt)
         t += dt
+        if Cfg.liteUI then -- Lite Panel Mode: skip the animated borders, only keep slider count-ups
+            for _, step in pairs(countups) do pcall(step, dt) end
+            return
+        end
         local speedMul = 1
         if Main and Main.Visible then
             pcall(function()
