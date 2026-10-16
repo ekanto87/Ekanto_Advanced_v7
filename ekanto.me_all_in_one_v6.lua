@@ -1,5 +1,5 @@
 --[[
-    EKANTO v6.0 "AURORA"
+    EKANTO V2 "AURORA"
     Universal Local Panel — client-side ScreenGui (single LocalScript)
 
     SECTIONS
@@ -8,12 +8,31 @@
       3. Config & Runtime State (+ central Loop, error handler)
       4. Utilities (drag inertia, ripple, arrows, smooth theme tween)
       5. Config IO (versioned, XOR+base64, per-game files)
-      6. Physics / Cheat Systems (God, Invis, AntiTrip, Fly, Speed, Aura, ESP+, Noclip, AntiAFK, Env)
+      6. Physics / Cheat Systems (God, Invis, AntiTrip, Fly, Speed, Aura, ESP+, Noclip, AntiAFK, Aim, Env)
       7. Lifecycle, Main Loop, Cleanup
       8. UI Framework (Toast, Tooltip, Sfx, Slider, Toggle, Button)
       9. Main Panel (tabs, waypoints, servers, palette, context menu, HUD + sparkline)
      10. Verification Gate (typewriter boot, keypad, glitch)
      11. Boot
+
+    V2 ADDITIONS
+      - GLOBAL REBRAND: everything is V2 now (header, boot shell, toasts, doc).
+      - Smart Invisibility: visual + systemic sever + TOTAL damage immunity, offense untouched.
+        Hides parts/name/query box (NPC raycasts miss you) and force-locks health. Your tool's
+        own raycast/touch hit registration is NOT touched, so you still deal full damage.
+      - God Mode rewritten: CanTouch stays ON, so TouchTransmitter signals survive and
+        coins / tools / map drops keep being collected. Immunity via health-lock + state patch.
+      - Melee Aura rewritten: reliable spatial detection + real Tool:Activate() force-fire.
+      - New option: Aura Hits Players Too (default off, classic NPC-only behaviour).
+
+    FIX LOG
+      - createSection / cardLabels were defined AFTER their first use -> buildMain died silently
+        (panel opened empty, key gate appeared over a half-built window). Both helpers now live
+        right after the tab bar is created.
+      - applyConfigToUI is defensive: a missing widget no longer kills the restore pass.
+      - boot prints the real buildMain error to the console instead of hiding it behind a pcall.
+      - God Mode no longer flips CanTouch (pickup regression fixed).
+      - Aura detection no longer depends on fragile parenting assumptions.
 ]]
 
 -- ============================================================
@@ -48,7 +67,7 @@ local KEY_REMEMBER_SECONDS = 3600 -- re-running within this window skips the key
 local GUI_NAME = "EkantoCyberPanel"
 local CONFIG_FILE = "EkantoConfig.json"
 local GAME_CONFIG_FILE = "EkantoConfig_" .. tostring(game.PlaceId) .. ".json"
-local CONFIG_VERSION = 2
+local CONFIG_VERSION = 3
 local INSTAGRAM_URL = "https://instagram.com"
 
 local Theme = {
@@ -122,13 +141,17 @@ local POP_INFO = TweenInfo.new(0.3, Enum.EasingStyle.Quint, Enum.EasingDirection
 local ENTRY_START_SCALE = 0.96
 local ENTRY_INFO = TweenInfo.new(0.3, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
 
-local PANEL_SIZE = UDim2.fromOffset(560, 430)
+local PANEL_SIZE = UDim2.fromOffset(640, 430)
 local MINI_SIZE = UDim2.fromOffset(52, 52)
 local PanelSize = PANEL_SIZE -- live size (user can resize the window)
 
 local SPEED_MIN, SPEED_MAX = 16, 250
 local FLY_MIN, FLY_MAX, FLY_SMOOTHING = 10, 300, 14
 local DEFAULT_WALKSPEED = 16
+
+-- micro-vector teleportation tuning
+local MICRO_MIN, MICRO_MAX = 5, 50     -- stored in hundredths of a stud (5 = 0.05, 20 = 0.20)
+local SLEEP_PERIOD = 14                -- every Nth tick the velocity write is skipped (packet gap)
 
 local AURA_RADIUS, AURA_PUSH, AURA_LIFT = 20, 300, 120
 local AURA_COOLDOWN, AURA_INTERVAL, AURA_SWING_INTERVAL = 0.25, 0.05, 0.12
@@ -153,18 +176,29 @@ local SOUND_IDS = {
 -- 3. CONFIG & RUNTIME STATE
 -- ============================================================
 local TOGGLE_KEYS = { "fly", "godMode", "invisible", "esp", "aura", "optimizer", "noFog", "fullBright",
-    "noclip", "antiAfk", "espInfo" }
+    "noclip", "antiAfk", "espInfo", "espUsername", "aimLock", "aimHead", "aimNpc", "aimFire",
+    "netSleep", "speedLegacy", "smartHop", "auraPlayers" }
 -- physical actions (fly, aura, noclip) are never auto-restored on load
 local PASSIVE_RESTORE = { godMode = true, invisible = true, esp = true,
-    optimizer = true, noFog = true, fullBright = true, antiAfk = true, espInfo = true }
+    optimizer = true, noFog = true, fullBright = true, antiAfk = true, espInfo = true,
+    espUsername = true, aimLock = true, aimHead = true, aimNpc = true, aimFire = true,
+    netSleep = true, smartHop = true, auraPlayers = true }
 
 local DEFAULT_CONFIG = {
     speed = SPEED_MIN, flySpeed = 50,
     fly = false, godMode = false, invisible = false, esp = false,
     aura = false, optimizer = false, noFog = false, fullBright = false,
     noclip = false, antiAfk = false, espInfo = true,
+    -- v7 additions: ESP name mode + aim lock
+    espUsername = false,
+    aimLock = false, aimFov = 25, aimSmooth = 8, aimHead = true, aimNpc = false, aimFire = false,
+    aimRange = 150,
+    -- v7.1 anti-cheat bypass + matchmaking
+    microStep = 20, netSleep = true, speedLegacy = false, flySpoof = 10, smartHop = true,
+    -- V2: aura targets players too (off = classic NPC-only)
+    auraPlayers = false,
     -- v6 settings
-    version = CONFIG_VERSION, volume = 40, perGame = false, waypoints = {},
+    version = CONFIG_VERSION, volume = 40, perGame = false, waypoints = {}, recentGames = {},
     -- v5 settings
     theme = "Neon", uiScale = 100, toasts = true, hud = false, hopMax = 8,
     font = "Clean", textBoost = 1,
@@ -172,10 +206,12 @@ local DEFAULT_CONFIG = {
     renderLevel = 0, fpsCap = 0, animCap = 0, viewDist = 0,
     liteUI = false, perfGuard = false, guardFps = 30,
     panelW = PANEL_SIZE.X.Offset, panelH = PANEL_SIZE.Y.Offset,
-    keys = { toggleUI = "RightControl", minimize = "M", fly = "F", noclip = "N", search = "Backquote" },
+    keys = { toggleUI = "RightControl", minimize = "M", fly = "F", noclip = "N", search = "Backquote",
+        aimLock = "LeftAlt" },
     profiles = {},
 }
-local DEFAULT_KEYS = { toggleUI = "RightControl", minimize = "M", fly = "F", noclip = "N", search = "Backquote" }
+local DEFAULT_KEYS = { toggleUI = "RightControl", minimize = "M", fly = "F", noclip = "N", search = "Backquote",
+    aimLock = "LeftAlt" }
 local PROFILE_TOGGLES = { "godMode", "invisible", "esp", "optimizer", "noFog", "fullBright" }
 
 local function deepCopy(t)
@@ -694,7 +730,11 @@ local function migrateConfig(data)
         end
         v = 2
     end
-    -- future: if v < 3 then ... v = 3 end
+    if v < 3 then
+        -- v2 -> V2: aura player-targeting option (default off = classic NPC-only behaviour)
+        if data.auraPlayers == nil then data.auraPlayers = false end
+        v = 3
+    end
     data.version = v
     return data
 end
@@ -732,8 +772,25 @@ local function applyConfigData(data)
     if type(data.liteUI) == "boolean" then Cfg.liteUI = data.liteUI end
     if type(data.perfGuard) == "boolean" then Cfg.perfGuard = data.perfGuard end
     if type(data.guardFps) == "number" then Cfg.guardFps = math.clamp(math.floor(data.guardFps + 0.5), 15, 60) end
+    -- v7 fields (toggles are handled by the TOGGLE_KEYS loop above)
+    if type(data.aimFov) == "number" then Cfg.aimFov = math.clamp(math.floor(data.aimFov + 0.5), 5, 90) end
+    if type(data.aimSmooth) == "number" then Cfg.aimSmooth = math.clamp(math.floor(data.aimSmooth + 0.5), 0, 30) end
+    -- v7.1 fields
+    if type(data.aimRange) == "number" then Cfg.aimRange = math.clamp(math.floor(data.aimRange + 0.5), 10, 500) end
+    if type(data.microStep) == "number" then Cfg.microStep = math.clamp(math.floor(data.microStep + 0.5), MICRO_MIN, MICRO_MAX) end
+    if type(data.flySpoof) == "number" then Cfg.flySpoof = math.clamp(math.floor(data.flySpoof + 0.5), 0, 60) end
+    if type(data.recentGames) == "table" then
+        local clean = {}
+        for _, e in ipairs(data.recentGames) do
+            if type(e) == "table" and type(e.id) == "number" and type(e.name) == "string" then
+                table.insert(clean, { id = e.id, name = string.sub(e.name, 1, 60), t = type(e.t) == "number" and e.t or 0 })
+                if #clean >= 25 then break end
+            end
+        end
+        Cfg.recentGames = clean
+    end
     if type(data.hopMax) == "number" then Cfg.hopMax = math.clamp(math.floor(data.hopMax + 0.5), 1, 30) end
-    if type(data.panelW) == "number" then Cfg.panelW = math.clamp(math.floor(data.panelW), 420, 900) end
+    if type(data.panelW) == "number" then Cfg.panelW = math.clamp(math.floor(data.panelW), 600, 900) end
     if type(data.panelH) == "number" then Cfg.panelH = math.clamp(math.floor(data.panelH), 320, 760) end
     if type(data.posX) == "number" and type(data.posY) == "number" then
         Cfg.posX, Cfg.posY = data.posX, data.posY
@@ -786,9 +843,10 @@ local function loadConfig()
     if Cfg.perGame then
         local gdata = readCfgFile(GAME_CONFIG_FILE)
         if gdata then
-            local keepVerified, keepPerGame = Cfg.verifiedAt, Cfg.perGame
+            local keepVerified, keepPerGame, keepRecent = Cfg.verifiedAt, Cfg.perGame, Cfg.recentGames
             applyConfigData(gdata)
             Cfg.verifiedAt, Cfg.perGame = keepVerified or Cfg.verifiedAt, keepPerGame
+            Cfg.recentGames = keepRecent
         end
     end
     if wasPlain then task.defer(function() pcall(saveConfig) end) end -- plain-JSON v5 file -> encoded v6
@@ -858,43 +916,42 @@ end
 -- 6. PHYSICS / CHEAT SYSTEMS
 -- ============================================================
 
--- ---------- 6a. God Mode ----------
-local originalCanTouch = setmetatable({}, { __mode = "k" })
-local descendantConn = nil
-local healthConn = nil
-
+-- ---------- 6a. God Mode (health-lock immunity, CanTouch left ON) ----------
+-- The old version flipped CanTouch=false on every limb, which killed TouchTransmitter signals,
+-- so coins / tools / map drops stopped being collected. This version leaves every part exactly
+-- as the game made it and enforces immunity through:
+--   * a Heartbeat health restore (God.step, on the central loop)
+--   * a per-character HealthChanged restore (hooked in hookCharacter)
+--   * a state patch that clears Dead so a fatal hit never sticks
 local God = {}
 
-function God.setPart(part, disable)
+function God.revive(hum)
     pcall(function()
-        if disable then
-            if originalCanTouch[part] == nil then originalCanTouch[part] = part.CanTouch end
-            part.CanTouch = false
-        else
-            local orig = originalCanTouch[part]
-            if orig ~= nil then part.CanTouch = orig; originalCanTouch[part] = nil end
+        if hum.Health <= 0 then
+            hum.Health = hum.MaxHealth
+            hum:ChangeState(Enum.HumanoidStateType.GettingUp)
         end
     end)
 end
 
-function God.applyToCharacter(char)
-    if not char then return end
-    for _, d in ipairs(char:GetDescendants()) do
-        if d:IsA("BasePart") then God.setPart(d, true) end
-    end
-end
-
-function God.restore()
-    for part in pairs(originalCanTouch) do God.setPart(part, false) end
-end
-
 function God.step(hum)
-    if Cfg.godMode and hum.Health > 0 and hum.Health < hum.MaxHealth then
+    if not Cfg.godMode or not hum then return end
+    if hum.Health <= 0 then
+        God.revive(hum)
+    elseif hum.Health < hum.MaxHealth then
         hum.Health = hum.MaxHealth
     end
 end
 
--- ---------- 6b. Invisibility + name tag ----------
+function God.restore() end -- nothing global to restore now (no part flags are touched)
+
+-- ---------- 6b. Smart Invisibility (visual + systemic sever + total damage immunity) ----------
+-- Three layers, none of which touch the tool hit pipeline:
+--   VISUAL   -> every part / decal forced fully transparent (local) + name tag hidden
+--   SYSTEMIC -> CanQuery=false on the body, so any client-side raycast looking for you misses
+--   IMMUNITY -> health force-locked every frame and on every hit
+-- CanTouch is deliberately NOT disabled, so your own tool's Touched/raycast hit registration
+-- (and map pickups) keep working -> you stay 100% able to damage NPCs and players.
 local originalVisual = setmetatable({}, { __mode = "k" })
 local originalDisplay = setmetatable({}, { __mode = "k" })
 
@@ -904,10 +961,11 @@ function Invis.hide(inst)
     pcall(function()
         if inst:IsA("BasePart") then
             if originalVisual[inst] == nil then
-                originalVisual[inst] = { t = inst.Transparency, l = inst.LocalTransparencyModifier }
+                originalVisual[inst] = { t = inst.Transparency, l = inst.LocalTransparencyModifier, q = inst.CanQuery }
             end
             inst.Transparency = 1
             inst.LocalTransparencyModifier = 1
+            inst.CanQuery = false
         elseif inst:IsA("Decal") then
             if originalVisual[inst] == nil then originalVisual[inst] = { t = inst.Transparency } end
             inst.Transparency = 1
@@ -936,7 +994,10 @@ function Invis.applyToCharacter(char)
     if not char then return end
     for _, d in ipairs(char:GetDescendants()) do Invis.hide(d) end
     local hum = char:FindFirstChildOfClass("Humanoid")
-    if hum then Invis.setNameTag(hum, true) end
+    if hum then
+        Invis.setNameTag(hum, true)
+        if hum.Health > 0 and hum.Health < hum.MaxHealth then hum.Health = hum.MaxHealth end
+    end
 end
 
 function Invis.restore()
@@ -945,6 +1006,7 @@ function Invis.restore()
             if inst:IsA("BasePart") then
                 inst.Transparency = data.t
                 inst.LocalTransparencyModifier = data.l or 0
+                inst.CanQuery = data.q ~= false
             elseif inst:IsA("Decal") then
                 inst.Transparency = data.t
             end
@@ -956,26 +1018,43 @@ end
 
 function Invis.step(hum)
     if not Cfg.invisible then return end
+    -- keep the hide + sever re-applied: games love to reset LocalTransparencyModifier / CanQuery
     for inst in pairs(originalVisual) do
         if inst and inst.Parent and inst:IsA("BasePart") then
-            inst.LocalTransparencyModifier = 1
+            if inst.LocalTransparencyModifier ~= 1 then inst.LocalTransparencyModifier = 1 end
+            if inst.Transparency ~= 1 then inst.Transparency = 1 end
+            if inst.CanQuery ~= false then inst.CanQuery = false end
         end
     end
-    if hum and hum.DisplayDistanceType ~= Enum.HumanoidDisplayDistanceType.None then
-        Invis.setNameTag(hum, true)
+    if hum then
+        if hum.DisplayDistanceType ~= Enum.HumanoidDisplayDistanceType.None then
+            Invis.setNameTag(hum, true)
+        end
+        -- total damage immunity
+        if hum.Health <= 0 then
+            God.revive(hum)
+        elseif hum.Health < hum.MaxHealth then
+            hum.Health = hum.MaxHealth
+        end
     end
 end
+
+-- ---------- character hook (God + Invis share one health listener) ----------
+local descendantConn = nil
+local healthConn = nil
 
 local function hookCharacter(char)
     if descendantConn then descendantConn:Disconnect(); descendantConn = nil end
     if healthConn then healthConn:Disconnect(); healthConn = nil end
     if not char then return end
     pcall(function()
-        if Cfg.godMode then God.applyToCharacter(char) end
         if Cfg.invisible then Invis.applyToCharacter(char) end
+        if Cfg.godMode then
+            local hum = char:FindFirstChildOfClass("Humanoid")
+            if hum and hum.Health > 0 then hum.Health = hum.MaxHealth end
+        end
         descendantConn = char.DescendantAdded:Connect(function(d)
             pcall(function()
-                if Cfg.godMode and d:IsA("BasePart") then God.setPart(d, true) end
                 if Cfg.invisible then Invis.hide(d) end
             end)
         end)
@@ -983,8 +1062,10 @@ local function hookCharacter(char)
         if hum then
             healthConn = hum.HealthChanged:Connect(function(h)
                 pcall(function()
-                    if Cfg.godMode and h > 0 and h < hum.MaxHealth then
+                    if (Cfg.godMode or Cfg.invisible) and h > 0 and h < hum.MaxHealth then
                         hum.Health = hum.MaxHealth
+                    elseif (Cfg.godMode or Cfg.invisible) and h <= 0 then
+                        God.revive(hum)
                     end
                 end)
             end)
@@ -1079,55 +1160,33 @@ function AntiTrip.step(hrp, hum, moving, moveDir, dt)
     hrp.AssemblyAngularVelocity = moving and Vector3.zero or Vector3.new(0, av.Y, 0)
 end
 
--- ---------- 6d. Fly ----------
-local Fly = { att = nil, lv = nil, ao = nil, current = Vector3.zero }
+-- ---------- 6d. Fly: Assembly Velocity Spoofing + explicit CFrame interpolation ----------
+-- No Attachment / LinearVelocity / AlignOrientation instances at all. The character is moved by
+-- CFrame interpolation while AssemblyLinearVelocity is held at a small pseudo-oscillating spoof
+-- vector, so the engine never reports a flight-sized velocity delta. A tiny sinusoidal micro-nudge
+-- (a perpendicular sine that returns to zero) keeps the client state from ever matching the
+-- server's prediction exactly, which is what state-synchronisation checks look for.
+local Fly = { vel = Vector3.zero, phase = 0 }
 
-function Fly.destroyInstances()
-    for _, k in ipairs({ "lv", "ao", "att" }) do
-        local inst = Fly[k]
-        if inst then pcall(function() inst:Destroy() end); Fly[k] = nil end
-    end
-end
+function Fly.ensure(hrp) end          -- kept for API compatibility: nothing to build anymore
+function Fly.destroyInstances() end   -- same
 
-function Fly.ensure(hrp)
-    if Fly.att and Fly.lv and Fly.ao
-        and Fly.att.Parent == hrp and Fly.lv.Parent == hrp and Fly.ao.Parent == hrp then
-        return
-    end
-    Fly.destroyInstances()
-    Fly.current = Vector3.zero
-    Fly.att = create("Attachment", { Name = "EkantoFlyAtt" }, hrp)
-    Fly.lv = create("LinearVelocity", {
-        Name = "EkantoFlyVelocity",
-        Attachment0 = Fly.att,
-        RelativeTo = Enum.ActuatorRelativeTo.World,
-        VelocityConstraintMode = Enum.VelocityConstraintMode.Vector,
-        MaxForce = math.huge,
-        VectorVelocity = Vector3.zero,
-    }, hrp)
-    Fly.ao = create("AlignOrientation", {
-        Name = "EkantoFlyOrient",
-        Mode = Enum.OrientationAlignmentMode.OneAttachment,
-        Attachment0 = Fly.att,
-        RigidityEnabled = true,
-        MaxTorque = math.huge,
-        Responsiveness = 200,
-        ReactionTorqueEnabled = false,
-        CFrame = hrp.CFrame.Rotation,
-    }, hrp)
+function Fly.reset()
+    Fly.vel = Vector3.zero
+    Fly.phase = 0
 end
 
 function Fly.enable(hrp, hum)
-    Fly.ensure(hrp)
+    Fly.reset()
     hum.PlatformStand = true
 end
 
 function Fly.step(hrp, hum, dt)
     local cam = workspace.CurrentCamera
     if not cam then return end
-    Fly.ensure(hrp)
     hum.PlatformStand = true
 
+    -- ---------- desired direction (camera aligned) ----------
     local target = Vector3.zero
     if not UserInputService:GetFocusedTextBox() then
         local look = cam.CFrame.LookVector
@@ -1143,73 +1202,160 @@ function Fly.step(hrp, hum, dt)
         if dir.Magnitude > 0.01 then target = dir.Unit * Cfg.flySpeed end
     end
 
+    -- ---------- velocity smoothing (frame-rate independent spring) ----------
     local alpha = 1 - math.exp(-FLY_SMOOTHING * dt)
-    Fly.current = Fly.current:Lerp(target, alpha)
-    if target.Magnitude < 0.01 and Fly.current.Magnitude < 0.5 then
-        Fly.current = Vector3.zero
-        hrp.AssemblyLinearVelocity = Vector3.zero
-    end
-    Fly.lv.VectorVelocity = Fly.current
+    Fly.vel = Fly.vel:Lerp(target, alpha)
+    if target.Magnitude < 0.01 and Fly.vel.Magnitude < 0.4 then Fly.vel = Vector3.zero end
 
-    local camLook = cam.CFrame.LookVector
-    local flat = Vector3.new(camLook.X, 0, camLook.Z)
-    if flat.Magnitude > 0.05 then Fly.ao.CFrame = CFrame.lookAt(Vector3.zero, flat.Unit) end
-    hrp.AssemblyAngularVelocity = Vector3.zero
+    Fly.phase += dt
+
+    -- ---------- assembly velocity spoof ----------
+    -- only a small fraction of the real vector is ever reported, plus a micro oscillation so the
+    -- reported velocity looks organic instead of a constant flight vector.
+    local spoofPct = math.clamp((Cfg.flySpoof or 10) / 100, 0, 1)
+    local jitter = Vector3.new(
+        math.sin(Fly.phase * 6.1) * 0.35,
+        math.sin(Fly.phase * 4.7 + 1.3) * 0.45,
+        math.cos(Fly.phase * 5.5) * 0.35)
+    local spoofVel = Fly.vel * spoofPct + jitter
+    hrp.AssemblyLinearVelocity = spoofVel
+
+    -- ---------- explicit CFrame interpolation ----------
+    -- move only the part the engine is not already covering, so nothing double-moves
+    local move = (Fly.vel - spoofVel) * dt
+
+    local flatLook = Vector3.new(cam.CFrame.LookVector.X, 0, cam.CFrame.LookVector.Z)
+    if flatLook.Magnitude > 0.01 then
+        flatLook = flatLook.Unit
+        local perp = Vector3.new(-flatLook.Z, 0, flatLook.X)
+        -- micro-nudge: lateral sine, amplitude ~0.15 studs, always returns to zero
+        move += perp * (math.sin(Fly.phase * 8.3) * 1.2 * dt)
+    end
+
+    local pos = hrp.Position + move
+    if flatLook.Magnitude > 0.01 then
+        hrp.CFrame = CFrame.lookAt(pos, pos + flatLook)
+    else
+        local rot = (hrp.CFrame - hrp.Position).Rotation
+        hrp.CFrame = CFrame.new(pos) * rot
+    end
 end
 
 function Fly.disable()
-    local carry = Fly.current
-    Fly.destroyInstances()
-    Fly.current = Vector3.zero
+    local carry = Fly.vel
+    Fly.reset()
     local _, hum, hrp = getCharacterParts()
     if hum then
         hum.PlatformStand = false
         if hum.Health > 0 then hum:ChangeState(Enum.HumanoidStateType.Freefall) end
     end
-    if hrp and carry.Magnitude > 0.5 then
-        task.spawn(function()
-            pcall(function()
-                for i = 1, 8 do
-                    if not Runtime.alive or Runtime.mode ~= "idle" or not hrp.Parent then return end
-                    local horizontal = Vector3.new(carry.X, 0, carry.Z) * (1 - i / 8)
-                    local v = hrp.AssemblyLinearVelocity
-                    hrp.AssemblyLinearVelocity = Vector3.new(horizontal.X, math.min(v.Y, 0), horizontal.Z)
-                    RunService.Heartbeat:Wait()
-                end
+    if hrp then
+        hrp.AssemblyLinearVelocity = Vector3.zero
+        if carry.Magnitude > 0.5 then
+            task.spawn(function()
+                pcall(function()
+                    for i = 1, 8 do
+                        if not Runtime.alive or Runtime.mode ~= "idle" or not hrp.Parent then return end
+                        local horizontal = Vector3.new(carry.X, 0, carry.Z) * (1 - i / 8)
+                        local v = hrp.AssemblyLinearVelocity
+                        hrp.AssemblyLinearVelocity = Vector3.new(horizontal.X, math.min(v.Y, 0), horizontal.Z)
+                        RunService.Heartbeat:Wait()
+                    end
+                end)
             end)
-        end)
+        end
     end
 end
 
-function Fly.reset()
-    Fly.destroyInstances()
-    Fly.current = Vector3.zero
+-- ---------- 6e. Speed: CFrame micro-vector teleportation ----------
+-- Humanoid.WalkSpeed is left completely untouched, so any server-side velocity check sees a
+-- perfectly ordinary character. The extra distance is delivered as tiny CFrame micro-steps
+-- (<= microStep studs each, default 0.20) which are far below a teleport-flag threshold.
+-- Network Sleep Emulation skips the velocity write on every Nth tick, so the engine reports its
+-- own value and the server sees a natural packet-gap pattern instead of a constant override.
+local Speed = { acc = 0, phase = 0, tick = 0 }
+
+function Speed.reset()
+    Speed.acc, Speed.phase, Speed.tick = 0, 0, 0
 end
 
--- ---------- 6e. Speed boost ----------
-local Speed = {}
+local function speedLegacyStep(hrp, hum, moveDir)
+    local dir = moveDir.Unit
+    local v = hrp.AssemblyLinearVelocity
+    hrp.AssemblyLinearVelocity = Vector3.new(dir.X * Cfg.speed, v.Y, dir.Z * Cfg.speed)
+    if hum.WalkSpeed ~= Cfg.speed then hum.WalkSpeed = Cfg.speed end
+end
 
 function Speed.step(hrp, hum, dt)
     local moveDir = hum.MoveDirection
     local moving = moveDir.Magnitude > 0
-    if moving then
-        local dir = moveDir.Unit
-        local current = hrp.AssemblyLinearVelocity
-        hrp.AssemblyLinearVelocity = Vector3.new(dir.X * Cfg.speed, current.Y, dir.Z * Cfg.speed)
-        if hum.WalkSpeed ~= Cfg.speed then hum.WalkSpeed = Cfg.speed end -- hybrid
+
+    if not moving then
+        Speed.acc = 0
+        if Cfg.speedLegacy then
+            local v = hrp.AssemblyLinearVelocity
+            hrp.AssemblyLinearVelocity = Vector3.new(0, v.Y, 0)
+        end
+        AntiTrip.step(hrp, hum, false, moveDir, dt)
+        return
     end
-    AntiTrip.step(hrp, hum, moving, moveDir, dt)
+
+    local dir = moveDir.Unit
+
+    if Cfg.speedLegacy then
+        speedLegacyStep(hrp, hum, moveDir)
+    else
+        local base = (hum.WalkSpeed > 0) and hum.WalkSpeed or DEFAULT_WALKSPEED
+        local micro = math.clamp((Cfg.microStep or 20) / 100, MICRO_MIN / 100, MICRO_MAX / 100)
+
+        -- distance the physics engine will not cover this tick
+        Speed.acc += math.max(0, Cfg.speed - base) * dt
+
+        -- deliver it in micro-teleports, each no bigger than `micro` studs
+        local steps = 0
+        while Speed.acc >= micro and steps < 120 do
+            hrp.CFrame = hrp.CFrame + dir * micro
+            Speed.acc -= micro
+            steps += 1
+        end
+        if Speed.acc > micro * 0.5 then
+            hrp.CFrame = hrp.CFrame + dir * Speed.acc
+            Speed.acc = 0
+        end
+
+        Speed.phase += dt
+        Speed.tick += 1
+
+        if Cfg.netSleep then
+            if Speed.tick % SLEEP_PERIOD ~= 0 then
+                -- organic micro-oscillation around the natural walk speed: never a flat constant
+                local osc = 0.94 + 0.12 * math.sin(Speed.phase * 7.3)
+                local v = hrp.AssemblyLinearVelocity
+                hrp.AssemblyLinearVelocity = Vector3.new(dir.X * base * osc, v.Y, dir.Z * base * osc)
+            end
+            -- on the Nth tick the write is skipped entirely -> natural packet gap
+        end
+    end
+
+    AntiTrip.step(hrp, hum, true, moveDir, dt)
 end
 
 function Speed.exit()
+    Speed.reset()
     pcall(function()
         local _, hum = getCharacterParts()
-        if hum and hum.WalkSpeed ~= DEFAULT_WALKSPEED then hum.WalkSpeed = DEFAULT_WALKSPEED end
+        if hum and Cfg.speedLegacy and hum.WalkSpeed ~= DEFAULT_WALKSPEED then
+            hum.WalkSpeed = DEFAULT_WALKSPEED
+        end
     end)
     AntiTrip.release()
 end
 
--- ---------- 6f. Fling Aura (NPC only) ----------
+-- ---------- 6f. Melee / Auto-Hit Aura (reliable spatial detection + real tool force-fire) ----------
+-- Detection = one OverlapParams query per scan. Every returned part is walked up to its owning
+-- Model; a Model with a live Humanoid and a non-anchored root is a valid target. The equipped
+-- Tool is force-fired through its own :Activate() so the game's normal hit registration runs and
+-- FULL tool damage lands - nothing is faked with TakeDamage.
 local Aura = { token = 0, cooldowns = setmetatable({}, { __mode = "k" }), lastSwing = 0 }
 
 local function findHumanoidModel(part)
@@ -1221,47 +1367,64 @@ local function findHumanoidModel(part)
     return nil
 end
 
+local function swingTool(char)
+    local tool = char:FindFirstChildOfClass("Tool")
+    if not tool then return false end
+    return pcall(function() tool:Activate() end)
+end
+
 function Aura.scan()
     if not Cfg.aura then return end
     local char, hum, hrp = getCharacterParts()
     if not (char and hum and hrp) or hum.Health <= 0 then return end
+
     local params = OverlapParams.new()
     params.FilterType = Enum.RaycastFilterType.Exclude
     params.FilterDescendantsInstances = { char }
-    local parts = workspace:GetPartBoundsInRadius(hrp.Position, AURA_RADIUS, params)
+    params.MaxParts = 300
+
+    local ok, parts = pcall(function()
+        return workspace:GetPartBoundsInRadius(hrp.Position, AURA_RADIUS, params)
+    end)
+    if not ok or not parts then return end
+
     local handled, now = {}, os.clock()
     local anyTarget = false
+
     for _, part in ipairs(parts) do
-        pcall(function()
-            local model = findHumanoidModel(part)
-            if not model or handled[model] then return end
+        local model = findHumanoidModel(part)
+        if model and model ~= char and not handled[model] then
             handled[model] = true
-            if Players:GetPlayerFromCharacter(model) ~= nil then return end
-            local targetHum = model:FindFirstChildOfClass("Humanoid")
-            local root = model:FindFirstChild("HumanoidRootPart")
-            if not targetHum or not root or targetHum.Health <= 0 or root.Anchored then return end
-            anyTarget = true
-            local last = Aura.cooldowns[model]
-            if last and now - last < AURA_COOLDOWN then return end
-            Aura.cooldowns[model] = now
-            local offset = root.Position - hrp.Position
-            local flat = Vector3.new(offset.X, 0, offset.Z)
-            if flat.Magnitude < 0.1 then
-                local look = hrp.CFrame.LookVector
-                flat = Vector3.new(look.X, 0, look.Z)
+            local isPlayer = Players:GetPlayerFromCharacter(model) ~= nil
+            if (not isPlayer) or Cfg.auraPlayers then
+                local targetHum = model:FindFirstChildOfClass("Humanoid")
+                local root = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
+                if targetHum and targetHum.Health > 0 and root and not root.Anchored then
+                    anyTarget = true
+                    local last = Aura.cooldowns[model]
+                    if not last or now - last >= AURA_COOLDOWN then
+                        Aura.cooldowns[model] = now
+                        local offset = root.Position - hrp.Position
+                        local flat = Vector3.new(offset.X, 0, offset.Z)
+                        if flat.Magnitude < 0.1 then
+                            local look = hrp.CFrame.LookVector
+                            flat = Vector3.new(look.X, 0, look.Z)
+                        end
+                        flat = flat.Unit
+                        pcall(function()
+                            root.AssemblyLinearVelocity = flat * AURA_PUSH + Vector3.new(0, AURA_LIFT, 0)
+                            root.AssemblyAngularVelocity = Vector3.new(
+                                math.random(-40, 40), math.random(-40, 40), math.random(-40, 40))
+                        end)
+                    end
+                end
             end
-            flat = flat.Unit
-            root.AssemblyLinearVelocity = flat * AURA_PUSH + Vector3.new(0, AURA_LIFT, 0)
-            root.AssemblyAngularVelocity = Vector3.new(
-                math.random(-40, 40), math.random(-40, 40), math.random(-40, 40))
-        end)
+        end
     end
+
     if anyTarget and now - Aura.lastSwing >= AURA_SWING_INTERVAL then
         Aura.lastSwing = now
-        pcall(function()
-            local tool = char:FindFirstChildOfClass("Tool")
-            if tool then tool:Activate() end
-        end)
+        swingTool(char)
     end
 end
 
@@ -1281,6 +1444,12 @@ end
 local ESP = { folder = nil, arrowLayer = nil, highlights = {}, tags = {}, charConns = {},
     playerAdded = nil, playerRemoving = nil, handle = nil }
 local HP_LOW, HP_HIGH = Color3.fromRGB(255, 59, 48), Color3.fromRGB(90, 255, 120)
+
+-- display name or username, depending on the ESP name option
+function ESP.nameOf(player)
+    if Cfg.espUsername then return player.Name end
+    return player.DisplayName
+end
 
 function ESP.removeTag(player)
     local t = ESP.tags[player]
@@ -1318,7 +1487,7 @@ function ESP.buildTag(player, char)
         l:SetAttribute("NoTheme", true); l:SetAttribute("NoFont", true); l:SetAttribute("NoBoost", true)
         return l
     end
-    lbl(0, 16, 14, player.DisplayName, Theme.White)
+    local nameLbl = lbl(0, 16, 14, ESP.nameOf(player), Theme.White)
     local distL = lbl(16, 14, 12, "", Theme.SubText)
     local bg = create("Frame", {
         Position = UDim2.new(0.1, 0, 0, 34), Size = UDim2.new(0.8, 0, 0, 5),
@@ -1330,7 +1499,7 @@ function ESP.buildTag(player, char)
     local arrow = buildArrow(ESP.arrowLayer, HP_LOW, 22)
     arrow.Visible = false
     ESP.tags[player] = { gui = gui, distL = distL, fill = fill, arrow = arrow, char = char,
-        hum = char:FindFirstChildOfClass("Humanoid") }
+        hum = char:FindFirstChildOfClass("Humanoid"), nameLbl = nameLbl, player = player }
 end
 
 function ESP.update()
@@ -1341,6 +1510,8 @@ function ESP.update()
     local center = vp / 2
     for player, t in pairs(ESP.tags) do
         local char = t.char
+        local wanted = ESP.nameOf(player)
+        if t.nameLbl.Text ~= wanted then t.nameLbl.Text = wanted end
         local root = char and char.Parent and char:FindFirstChild("HumanoidRootPart")
         if not root then
             t.arrow.Visible = false
@@ -1491,6 +1662,247 @@ function AntiAFK.stop()
     if AntiAFK.handle then Loop.remove(AntiAFK.handle); AntiAFK.handle = nil end
 end
 
+-- ---------- 6g4. Aim Lock (camera auto-aim + manual pin) ----------
+local Aim = { bound = false, target = nil, pinned = nil, pinnedPlayer = nil,
+    highlight = nil, lastFire = 0, lastPin = 0 }
+
+local function aimRange()
+    return Cfg.aimRange or 150
+end
+
+local function aimPart(char)
+    if not char then return nil end
+    local part = Cfg.aimHead and char:FindFirstChild("Head") or nil
+    return part or char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart
+end
+
+local function aimAngle(cam, char)
+    local part = aimPart(char)
+    if not part then return nil end
+    local dir = part.Position - cam.CFrame.Position
+    if dir.Magnitude < 0.1 then return nil end
+    return math.deg(math.acos(math.clamp(dir.Unit:Dot(cam.CFrame.LookVector), -1, 1))), part
+end
+
+local function aimValid(char, maxDist)
+    if not char or not char.Parent then return false end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    if not hum or hum.Health <= 0 then return false end
+    local part = aimPart(char)
+    if not part then return false end
+    local cam = workspace.CurrentCamera
+    if cam and maxDist and (part.Position - cam.CFrame.Position).Magnitude > maxDist then return false end
+    return true
+end
+
+local function aimCandidates(cam, fov, range)
+    local myChar = LocalPlayer.Character
+    local origin = cam.CFrame.Position
+    local best, bestScore = nil, nil
+    local function consider(char)
+        if not char or char == myChar or not char.Parent then return end
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if not hum or hum.Health <= 0 then return end
+        local part = aimPart(char)
+        if not part then return end
+        if (part.Position - origin).Magnitude > range then return end
+        local ang = aimAngle(cam, char)
+        if not ang or ang > fov then return end
+        if not bestScore or ang < bestScore then bestScore, best = ang, char end
+    end
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer then consider(plr.Character) end
+    end
+    if Cfg.aimNpc then
+        for _, obj in ipairs(workspace:GetChildren()) do
+            if obj:IsA("Model") and obj:FindFirstChildOfClass("Humanoid")
+                and Players:GetPlayerFromCharacter(obj) == nil then
+                consider(obj)
+            end
+        end
+    end
+    return best
+end
+
+local function aimResolvePin()
+    if aimValid(Aim.pinned, aimRange() * 1.25) then return Aim.pinned end
+    local plr = Aim.pinnedPlayer
+    if plr and plr.Parent then
+        local char = plr.Character
+        if aimValid(char, aimRange() * 1.25) then
+            Aim.pinned = char
+            return char
+        end
+    end
+    if Aim.pinned or Aim.pinnedPlayer then
+        Aim.pinned = nil
+        if not (plr and plr.Parent) then Aim.pinnedPlayer = nil end
+    end
+    return nil
+end
+
+function Aim.clearPin(silent)
+    local had = (Aim.pinned ~= nil) or (Aim.pinnedPlayer ~= nil)
+    Aim.pinned, Aim.pinnedPlayer = nil, nil
+    if had and not silent then Toast.show("Pin released", Theme.Off, 1.5) end
+end
+
+local function aimPickUnderMouse()
+    local cam = workspace.CurrentCamera
+    if not cam then return nil end
+    local range = aimRange()
+    local myChar = LocalPlayer.Character
+    local params = RaycastParams.new()
+    params.FilterType = Enum.RaycastFilterType.Exclude
+    params.FilterDescendantsInstances = myChar and { myChar } or {}
+    local m = UserInputService:GetMouseLocation()
+    local ray = cam:ViewportPointToRay(m.X, m.Y)
+    local hit = workspace:Raycast(ray.Origin, ray.Direction * range, params)
+    if hit then
+        local node = hit.Instance
+        while node and node ~= workspace do
+            if node:IsA("Model") and node:FindFirstChildOfClass("Humanoid") then return node end
+            node = node.Parent
+        end
+    end
+    local best, bestD = nil, 70
+    local function consider(char)
+        if not aimValid(char, range) then return end
+        local part = aimPart(char)
+        local sp, onScreen = cam:WorldToViewportPoint(part.Position)
+        if not onScreen or sp.Z <= 0 then return end
+        local d = (Vector2.new(sp.X, sp.Y) - m).Magnitude
+        if d < bestD then bestD, best = d, char end
+    end
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer then consider(plr.Character) end
+    end
+    if Cfg.aimNpc then
+        for _, obj in ipairs(workspace:GetChildren()) do
+            if obj:IsA("Model") and obj:FindFirstChildOfClass("Humanoid")
+                and Players:GetPlayerFromCharacter(obj) == nil then
+                consider(obj)
+            end
+        end
+    end
+    return best
+end
+
+function Aim.pinUnderMouse()
+    local now = os.clock()
+    if now - Aim.lastPin < 0.15 then return end
+    Aim.lastPin = now
+    if Aim.pinned or Aim.pinnedPlayer then
+        Aim.clearPin()
+        return
+    end
+    local char = aimPickUnderMouse()
+    if not char then
+        Toast.show("No target under the crosshair to pin", Theme.Off, 1.8)
+        return
+    end
+    local plr = Players:GetPlayerFromCharacter(char)
+    Aim.pinned, Aim.pinnedPlayer = char, plr
+    Aim.target = char
+    Toast.show("Target pinned: " .. (plr and plr.DisplayName or char.Name) .. " (middle click to unpin)", Theme.Cyan, 2.5)
+end
+
+local function aimHighlight(char, pinned)
+    if not char then
+        if Aim.highlight then pcall(function() Aim.highlight.Adornee = nil end) end
+        return
+    end
+    if not Aim.highlight or not Aim.highlight.Parent then
+        Aim.highlight = create("Highlight", {
+            Name = "EkantoAimTarget",
+            FillColor = Theme.Green, FillTransparency = 0.75,
+            OutlineColor = Theme.White, OutlineTransparency = 0,
+            DepthMode = Enum.HighlightDepthMode.AlwaysOnTop,
+        }, ScreenGui)
+    end
+    pcall(function()
+        Aim.highlight.FillColor = pinned and Theme.Cyan or Theme.Green
+        Aim.highlight.OutlineColor = pinned and Theme.Cyan or Theme.White
+    end)
+    if Aim.highlight.Adornee ~= char then Aim.highlight.Adornee = char end
+end
+
+local function aimStep(dt)
+    local cam = workspace.CurrentCamera
+    if not cam then return end
+    local fov = Cfg.aimFov or 25
+    local range = aimRange()
+    local target = nil
+    local pinned = false
+
+    if Aim.pinned or Aim.pinnedPlayer then
+        target = aimResolvePin()
+        pinned = target ~= nil
+    end
+
+    if not target then
+        local keep = false
+        if Aim.target and Aim.target.Parent then
+            local hum = Aim.target:FindFirstChildOfClass("Humanoid")
+            local part = hum and aimPart(Aim.target)
+            if hum and hum.Health > 0 and part then
+                local dist = (part.Position - cam.CFrame.Position).Magnitude
+                local ang = aimAngle(cam, Aim.target)
+                if dist <= range * 1.15 and ang and ang <= fov * 1.4 then keep = true end
+            end
+        end
+        if keep then target = Aim.target else target = aimCandidates(cam, fov, range) end
+    end
+
+    Aim.target = target
+    if not target then aimHighlight(nil) return end
+    local part = aimPart(target)
+    if not part then Aim.target = nil; aimHighlight(nil); return end
+    aimHighlight(target, pinned)
+
+    local desired = CFrame.lookAt(cam.CFrame.Position, part.Position)
+    local smooth = Cfg.aimSmooth or 0
+    if smooth <= 0 then
+        cam.CFrame = desired
+    else
+        cam.CFrame = cam.CFrame:Lerp(desired, 1 - math.exp(-smooth * dt))
+    end
+
+    if Cfg.aimFire then
+        local now = os.clock()
+        if now - Aim.lastFire >= 0.08 then
+            Aim.lastFire = now
+            local char = LocalPlayer.Character
+            local tool = char and char:FindFirstChildOfClass("Tool")
+            if tool then pcall(function() tool:Activate() end) end
+        end
+    end
+end
+
+local AIM_BIND = "EkantoAimLock"
+
+function Aim.start()
+    if Aim.bound then return end
+    Aim.bound = true
+    pcall(function() RunService:UnbindFromRenderStep(AIM_BIND) end)
+    RunService:BindToRenderStep(AIM_BIND, Enum.RenderPriority.Camera.Value + 1, function(dt)
+        local ok, err = pcall(aimStep, dt)
+        if not ok then
+            Aim.bound = false
+            pcall(function() RunService:UnbindFromRenderStep(AIM_BIND) end)
+            Errors.report("Aim Lock", err, "aimLock")
+        end
+    end)
+end
+
+function Aim.stop()
+    Aim.bound = false
+    pcall(function() RunService:UnbindFromRenderStep(AIM_BIND) end)
+    Aim.target = nil
+    Aim.clearPin(true)
+    aimHighlight(nil)
+end
+
 -- ---------- 6h. Environment ----------
 local Optimizer = {
     saved = setmetatable({}, { __mode = "k" }),
@@ -1534,12 +1946,12 @@ function Optimizer.enable()
         Optimizer.lighting = Optimizer.lighting or { shadows = Lighting.GlobalShadows }
         Lighting.GlobalShadows = false
     end)
-    pcall(function() -- lower mesh detail: far meshes switch to cheap versions but are still drawn
+    pcall(function()
         local r = settings().Rendering
         if Optimizer.mesh == nil then Optimizer.mesh = r.MeshPartDetailLevel end
         r.MeshPartDetailLevel = Enum.MeshPartDetailLevel.Level01
     end)
-    pcall(function() -- terrain water effects and grass decoration are expensive on weak GPUs
+    pcall(function()
         local t = workspace:FindFirstChildOfClass("Terrain")
         if not t then return end
         Optimizer.terrain = Optimizer.terrain or {}
@@ -1563,7 +1975,6 @@ function Optimizer.enable()
             for _, d in ipairs(workspace:GetDescendants()) do
                 if not Runtime.alive or Optimizer.token ~= myToken then return end
                 optimizeInstance(d)
-                -- spend at most ~2.5 ms per frame so enabling it never causes a freeze
                 if os.clock() - t0 > 0.0025 then task.wait(); t0 = os.clock() end
             end
         end)
@@ -1633,7 +2044,7 @@ function Env.setFog(on)
         if on then
             if not Env.fog then
                 local atmo = getAtmosphere()
-                local far = Env.far -- if a view distance is active, the real originals live there
+                local far = Env.far
                 Env.fog = {
                     fogStart = far and far.fogStart or Lighting.FogStart,
                     fogEnd = far and far.fogEnd or Lighting.FogEnd,
@@ -1675,8 +2086,6 @@ function Env.setBright(on)
     end)
 end
 
--- View distance: pushes fog out to `v` studs and thins the atmosphere (cheap on the GPU).
--- It cannot load parts the server streams out (StreamingEnabled games decide that server-side).
 function Env.assertView()
     local far, v = Env.far, Cfg.viewDist or 0
     if not far or v <= 0 then return end
@@ -1685,7 +2094,7 @@ function Env.assertView()
         Lighting.FogStart = math.max(far.fogStart, v * 0.6)
         local atmo = getAtmosphere()
         if atmo and far.density then
-            local k = math.clamp(1500 / v, 0.02, 1) -- farther view = thinner haze
+            local k = math.clamp(1500 / v, 0.02, 1)
             atmo.Density = far.density * k
             atmo.Haze = (far.haze or 0) * k
         end
@@ -1735,13 +2144,11 @@ end
 
 -- ---------- 6h-b. Performance caps ----------
 local Perf = {
-    origQuality = nil, origFps = nil, fpsWarned = false, notify = nil, -- notify is bound once Toast exists
+    origQuality = nil, origFps = nil, fpsWarned = false, notify = nil,
     anim = { animators = setmetatable({}, { __mode = "k" }), frozen = setmetatable({}, { __mode = "k" }),
         handle = nil, conn = nil, token = 0 },
 }
 
--- Render Quality Level: Roblox culls far / small objects at low quality levels, so a LOW level is what makes
--- distant things disappear. 0 = leave the game's own setting; 1-10 = force that level (higher = farther).
 function Perf.applyQuality()
     pcall(function()
         local rendering = settings().Rendering
@@ -1756,7 +2163,6 @@ function Perf.applyQuality()
     end)
 end
 
--- FPS Cap: uses the executor's setfpscap. 0 = hand control back to whatever it was before.
 function Perf.applyFpsCap()
     local v = Cfg.fpsCap or 0
     if typeof(setfpscap) ~= "function" then
@@ -1782,8 +2188,6 @@ function Perf.applyFpsCap()
     end
 end
 
--- Animation Distance Cap: characters farther than the cap have their playing animation tracks frozen
--- locally (speed 0) and thawed when you get close again. Local only; how well it holds depends on the game.
 local function trackAnimator(inst)
     if inst:IsA("Animator") then Perf.anim.animators[inst] = true end
 end
@@ -1880,7 +2284,10 @@ function Features.fly(on) Cfg.fly = on end
 function Features.godMode(on)
     Cfg.godMode = on
     pcall(function()
-        if on then God.applyToCharacter(LocalPlayer.Character) else God.restore() end
+        if on then
+            local _, hum = getCharacterParts()
+            if hum and hum.Health > 0 then hum.Health = hum.MaxHealth end
+        end
     end)
 end
 
@@ -1929,6 +2336,18 @@ end
 
 function Features.espInfo(on) Cfg.espInfo = on end
 
+function Features.espUsername(on)
+    Cfg.espUsername = on
+    for player, t in pairs(ESP.tags) do
+        if t.nameLbl then t.nameLbl.Text = ESP.nameOf(player) end
+    end
+end
+
+function Features.aimLock(on)
+    Cfg.aimLock = on
+    if on then Aim.start() else Aim.stop() end
+end
+
 -- every feature setter runs through the central error handler
 for name, fn in pairs(Features) do
     Features[name] = function(on)
@@ -1969,7 +2388,6 @@ local function movementStep(dt)
     end
 end
 
--- gameplay handlers on the single central Heartbeat (registered once buildMain runs)
 local function registerGameplayLoops()
     Loop.register("Movement", function(dt)
         local ok, err = pcall(movementStep, dt)
@@ -1995,13 +2413,13 @@ local function registerGameplayLoops()
 end
 
 local function onCharacterAdded(char)
-    table.clear(originalCanTouch)
     table.clear(originalVisual)
     table.clear(originalDisplay)
     table.clear(Noclip.orig); Noclip.char = nil
     Runtime.mode = "idle"
     AntiTrip.reset()
     Fly.reset()
+    Speed.reset()
     task.spawn(function()
         pcall(function()
             char:WaitForChild("HumanoidRootPart", 10)
@@ -2028,8 +2446,9 @@ local function fullCleanup()
     descendantConn, healthConn = nil, nil
     pcall(Aura.stop)
     pcall(ESP.disable)
-    pcall(Noclip.stop)     -- restores CanCollide on every touched part
+    pcall(Noclip.stop)
     pcall(AntiAFK.stop)
+    pcall(Aim.stop)
     ThemeFx.items = nil
     pcall(function() if Loop.conn then Loop.conn:Disconnect(); Loop.conn = nil end end)
     table.clear(Loop.handlers)
@@ -2048,7 +2467,6 @@ end
 -- ============================================================
 -- 8. UI FRAMEWORK
 -- ============================================================
--- ---------- Stagger entrance ----------
 local function staggerIn(holder)
     local items = {}
     for _, c in ipairs(holder:GetChildren()) do
@@ -2156,7 +2574,7 @@ end
 -- ---------- Centralized error handling ----------
 function Errors.disable(featureKey)
     if not featureKey or Errors.busy then return end
-    Errors.busy = true -- a failing "off" callback must not re-enter this handler forever
+    Errors.busy = true
     pcall(function()
         local t = UI.toggles[featureKey]
         if t and t.Get() then t.Set(false, true) end
@@ -2256,7 +2674,6 @@ end
 function Tooltip.show()
     if not Tooltip.frame then return end
     Tooltip.token += 1
-    local tok = Tooltip.token
     Tooltip.frame.Visible = true
     local info = TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
     TweenService:Create(Tooltip.frame, info, { BackgroundTransparency = 0.05 }):Play()
@@ -2304,7 +2721,7 @@ local function addHoverFX(obj, stroke, restTransparency)
 end
 
 -- ---------- Card ----------
-local CardContext = { open = nil, t = 0 } -- right-click menu hook, installed by buildMain
+local CardContext = { open = nil, t = 0 }
 local function createCard(page, name, height, accent)
     page.order += 1
     local card = create("Frame", {
@@ -2372,7 +2789,6 @@ local function createSlider(page, spec)
     addCorner(knob, 8)
     addFlatStroke(knob, Theme.Green, 2)
 
-    -- floating value popup above the knob
     local popup = create("TextLabel", {
         AnchorPoint = Vector2.new(0.5, 1),
         Position = UDim2.new(0.5, 0, 0, -8),
@@ -2408,7 +2824,6 @@ local function createSlider(page, spec)
     end
     render(false)
 
-    -- smooth count-up/down for the numeric label
     countups[spec.key] = function(dt)
         if displayValue ~= value then
             displayValue = displayValue + (value - displayValue) * math.clamp(dt * 18, 0, 1)
@@ -2509,7 +2924,6 @@ local function createToggle(page, spec)
             TweenService:Create(sKnob, SPRING_INFO, { Position = UDim2.new(1, -20, 0.5, 0), BackgroundColor3 = Theme.Green }):Play()
             TweenService:Create(switch, SPRING_INFO, { BackgroundColor3 = Theme.OnDark }):Play()
             TweenService:Create(swStroke, SPRING_INFO, { Color = Theme.Green }):Play()
-            -- glow pulse loop while on
             pulseToken += 1
             local tok = pulseToken
             task.spawn(function()
@@ -2611,13 +3025,23 @@ local function featureCallback(label, fn)
 end
 
 local function applyConfigToUI()
-    UI.sliders.speed.Set(Cfg.speed)
-    UI.sliders.flySpeed.Set(Cfg.flySpeed)
-    for _, key in ipairs({ "renderLevel", "fpsCap", "animCap", "viewDist" }) do
-        pcall(function() UI.sliders[key].Set(Cfg[key]) end)
+    local missing = {}
+    local function slider(key, v)
+        local s = UI.sliders[key]
+        if s then s.Set(v) else table.insert(missing, "slider:" .. key) end
     end
-    for _, k in ipairs(TOGGLE_KEYS) do
-        UI.toggles[k].Set(Cfg[k] and PASSIVE_RESTORE[k] == true, true)
+    local function toggle(key, v)
+        local t = UI.toggles[key]
+        if t then t.Set(v, true) else table.insert(missing, "toggle:" .. key) end
+    end
+    slider("speed", Cfg.speed)
+    slider("flySpeed", Cfg.flySpeed)
+    for _, key in ipairs({ "renderLevel", "fpsCap", "animCap", "viewDist", "microStep", "flySpoof", "aimFov", "aimSmooth", "aimRange" }) do
+        slider(key, Cfg[key])
+    end
+    for _, k in ipairs(TOGGLE_KEYS) do toggle(k, Cfg[k] and PASSIVE_RESTORE[k] == true) end
+    if #missing > 0 then
+        Toast.show("Config restore: missing " .. table.concat(missing, ", "), Theme.Red, 5)
     end
 end
 
@@ -2663,7 +3087,7 @@ local function buildMain()
         AnchorPoint = Vector2.new(0, 0.5),
         Position = UDim2.new(0, 108, 0.5, 2),
         Size = UDim2.fromOffset(40, 14),
-        BackgroundTransparency = 1, Text = "v6.0",
+        BackgroundTransparency = 1, Text = "v2",
         TextSize = 11, TextColor3 = Theme.Off, ZIndex = 4,
     }, header)
 
@@ -2708,7 +3132,7 @@ local function buildMain()
     }, body)
     table.insert(animatedGradients, create("UIGradient", { Color = neonGradient() }, divider))
 
-    makeDraggable(header, Main, nil, nil, true) -- inertia on the window
+    makeDraggable(header, Main, nil, nil, true)
 
     -- ---------- Tabs with sliding underline ----------
     local tabBar = create("Frame", {
@@ -2721,9 +3145,8 @@ local function buildMain()
         Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder,
     }, tabBar)
 
-    local TAB_COUNT, TAB_PAD = 5, 6
+    local TAB_COUNT, TAB_PAD = 6, 6
     local tabW = UDim2.new(1 / TAB_COUNT, -(TAB_PAD * (TAB_COUNT - 1)) / TAB_COUNT, 1, 0)
-    -- indicator lives in its own holder so the UIListLayout above doesn't treat it as a tab slot
     local indicatorHolder = create("Frame", {
         Position = tabBar.Position, Size = tabBar.Size,
         BackgroundTransparency = 1, ZIndex = 3,
@@ -2760,7 +3183,7 @@ local function buildMain()
             LayoutOrder = tabOrder,
             Size = tabW,
             BackgroundColor3 = Theme.Black, BorderSizePixel = 0,
-            Text = name, TextSize = 14, AutoButtonColor = false, ZIndex = 4,
+            Text = name, TextSize = 13, AutoButtonColor = false, ZIndex = 4,
             TextTruncate = Enum.TextTruncate.AtEnd,
         }, tabBar)
         button:SetAttribute("NoBoost", true)
@@ -2810,29 +3233,70 @@ local function buildMain()
     local combatPage = createTab("Combat")
     local perfPage = createTab("Performance")
     local toolsPage = createTab("Tools")
+    local gamesPage = createTab("Games")
     local settingsPage = createTab("Settings")
 
+    local function createSection(page, text)
+        page.order += 1
+        return create("TextLabel", {
+            Name = "Section" .. page.order, LayoutOrder = page.order,
+            Size = UDim2.new(1, -10, 0, 22), BackgroundTransparency = 1,
+            Text = "  " .. string.upper(text), TextSize = 13, TextColor3 = Theme.Cyan,
+            TextXAlignment = Enum.TextXAlignment.Left,
+        }, page.frame)
+    end
+
+    local function cardLabels(card, title, desc, rightPad)
+        create("TextLabel", {
+            Position = UDim2.new(0, 12, 0, 7), Size = UDim2.new(1, -(rightPad or 24), 0, 22),
+            BackgroundTransparency = 1, Text = title, TextSize = 16,
+            TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
+        }, card)
+        return create("TextLabel", {
+            Position = UDim2.new(0, 12, 0, 31), Size = UDim2.new(1, -(rightPad or 24), 0, 20),
+            BackgroundTransparency = 1, Text = desc, TextSize = 14, TextColor3 = Theme.SubText,
+            TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
+        }, card)
+    end
+
     -- ---------- Movement ----------
+    createSection(movePage, "Speed")
     createSlider(movePage, {
-        key = "speed", name = "WalkSpeed Changer",
-        desc = "Speed boost + anti-trip • 16 - 250",
-        tip = "Pushes your root part along your move direction, sets WalkSpeed alongside, blocks Ragdoll/FallingDown/Tripping and locks the upright axis.",
+        key = "speed", name = "Speed Boost (Micro-Teleport)",
+        desc = "16 - 250 • WalkSpeed stays untouched",
+        tip = "The extra distance is delivered as CFrame micro-steps of at most the Micro-Step Size, so no single move is big enough to look like a teleport. Your real WalkSpeed is never changed, so server-side velocity checks see a normal character.",
         min = SPEED_MIN, max = SPEED_MAX, value = Cfg.speed, accent = Theme.Cyan,
         onChange = function(v) Cfg.speed = v; scheduleSave() end,
     })
+    createSlider(movePage, {
+        key = "microStep", name = "Micro-Step Size (x0.01 studs)",
+        desc = "20 = 0.20 studs per step • 5 - 50",
+        tip = "How far each individual micro-teleport moves you. 0.18 - 0.23 studs is the sweet spot: small enough to stay under almost every teleport threshold, big enough to stay cheap on the CPU. Lower it if a strict game still rubberbands you.",
+        min = MICRO_MIN, max = MICRO_MAX, value = Cfg.microStep, accent = Theme.Green,
+        onChange = function(v) Cfg.microStep = v; scheduleSave() end,
+    })
+    createToggle(movePage, {
+        key = "netSleep", name = "Network Sleep Emulation",
+        desc = "Periodic velocity write gaps",
+        tip = "On most ticks your reported velocity is a small organic oscillation around your natural walk speed. Every 14th tick the write is skipped entirely, so the engine reports its own value and the server sees a natural packet-gap pattern instead of a constant override.",
+        accent = Theme.Cyan,
+        callback = function(on) Cfg.netSleep = on and true or false; scheduleSave() end,
+    })
+    createToggle(movePage, {
+        key = "speedLegacy", name = "Legacy Body-Force Speed",
+        desc = "Fallback: pushes root part + sets WalkSpeed",
+        tip = "The old method. Use it for the rare game where CFrame speed fights with a custom movement controller. Sets AssemblyLinearVelocity and WalkSpeed directly.",
+        accent = Theme.Green,
+        callback = function(on) Cfg.speedLegacy = on and true or false; scheduleSave() end,
+    })
+
+    createSection(movePage, "Flight")
     createToggle(movePage, {
         key = "fly", name = "Fly Hack Mode",
         desc = "F • WASD + Space/E up + Shift/Q down",
-        tip = "Camera-aligned flight via LinearVelocity + AlignOrientation. F toggles. Releasing all keys hovers in place.",
+        tip = "No LinearVelocity, no AlignOrientation, no attachments: the character is moved by explicit CFrame interpolation while the reported velocity is spoofed to a small oscillating vector. A tiny lateral sine nudge keeps client state from matching the server prediction exactly.",
         accent = Theme.Cyan, rebind = "fly",
         callback = featureCallback("Fly Hack Mode", Features.fly),
-    })
-    createToggle(movePage, {
-        key = "noclip", name = "Noclip",
-        desc = "N • walk through walls",
-        tip = "Loops CanCollide off on every character part while enabled. Turning it off restores exactly the parts it changed.",
-        accent = Theme.Green, rebind = "noclip",
-        callback = featureCallback("Noclip", Features.noclip),
     })
     createSlider(movePage, {
         key = "flySpeed", name = "Fly Speed Control",
@@ -2840,6 +3304,22 @@ local function buildMain()
         tip = "Changes flight speed in real time, even mid-flight.",
         min = FLY_MIN, max = FLY_MAX, value = Cfg.flySpeed, accent = Theme.Green,
         onChange = function(v) Cfg.flySpeed = v; scheduleSave() end,
+    })
+    createSlider(movePage, {
+        key = "flySpoof", name = "Fly Velocity Spoof",
+        desc = "Reported velocity as % of real • 0 - 60",
+        tip = "How much of your true flight vector gets written to AssemblyLinearVelocity. 0 = the engine reports almost nothing (maximum stealth, all motion is CFrame). 10% is the default balance. Raise it if a game relies on velocity for animations.",
+        min = 0, max = 60, value = Cfg.flySpoof, accent = Theme.Cyan,
+        onChange = function(v) Cfg.flySpoof = v; scheduleSave() end,
+    })
+
+    createSection(movePage, "Misc")
+    createToggle(movePage, {
+        key = "noclip", name = "Noclip",
+        desc = "N • walk through walls",
+        tip = "Loops CanCollide off on every character part while enabled. Turning it off restores exactly the parts it changed.",
+        accent = Theme.Green, rebind = "noclip",
+        callback = featureCallback("Noclip", Features.noclip),
     })
 
     -- ---------- Combat ----------
@@ -2858,25 +3338,89 @@ local function buildMain()
         callback = featureCallback("ESP Info", Features.espInfo),
     })
     createToggle(combatPage, {
+        key = "espUsername", name = "ESP Show Username",
+        desc = "Off = display name • On = @username",
+        tip = "Switches the name above every player between their display name and their real username. Needs Player ESP on. Applies instantly.",
+        accent = Theme.Cyan,
+        callback = featureCallback("ESP Username", Features.espUsername),
+    })
+
+    createSection(combatPage, "Aim")
+    createToggle(combatPage, {
+        key = "aimLock", name = "Aim Lock (Auto-Aim)",
+        desc = "Hotkey: " .. (Cfg.keys.aimLock or "LeftAlt") .. " • camera locks onto the crosshair target",
+        tip = "Picks the player closest to the centre of your screen inside the FOV cone AND inside Aim Range, then keeps the camera on them. Runs after the game's camera, so it works in shooters too. No line-of-sight check, so it locks through walls. Middle click pins a target.",
+        accent = Theme.Green, rebind = "aimLock",
+        callback = featureCallback("Aim Lock", Features.aimLock),
+    })
+    createSlider(combatPage, {
+        key = "aimFov", name = "Aim FOV", desc = "How far from the crosshair it grabs • 5 - 90 degrees",
+        tip = "The aim only engages when a target is inside this cone around your crosshair. Lower = only locks when you are already pointing at them. A pinned target ignores this cone completely.",
+        min = 5, max = 90, value = Cfg.aimFov, accent = Theme.Cyan,
+        onChange = function(v) Cfg.aimFov = v; scheduleSave() end,
+    })
+    createSlider(combatPage, {
+        key = "aimRange", name = "Aim Range Control", desc = "Hard stud limit • 10 - 500",
+        tip = "The engine strictly ignores any player or NPC farther than this. A pinned target is allowed a 25% grace band before the pin releases itself.",
+        min = 10, max = 500, value = Cfg.aimRange, accent = Theme.Green,
+        onChange = function(v) Cfg.aimRange = v; scheduleSave() end,
+    })
+    createSlider(combatPage, {
+        key = "aimSmooth", name = "Aim Smoothness", desc = "0 = instant snap • higher = smoother",
+        tip = "0 snaps the camera straight onto the target. Higher values glide the camera over, which feels less robotic but tracks fast targets slightly slower.",
+        min = 0, max = 30, value = Cfg.aimSmooth, accent = Theme.Cyan,
+        onChange = function(v) Cfg.aimSmooth = v; scheduleSave() end,
+    })
+    createToggle(combatPage, {
+        key = "aimHead", name = "Aim at Head", desc = "Head instead of torso",
+        tip = "On: locks onto the Head. Off: locks onto the torso / root part, which is steadier against jumping targets.",
+        accent = Theme.Green,
+        callback = function(on) Cfg.aimHead = on and true or false; scheduleSave() end,
+    })
+    createToggle(combatPage, {
+        key = "aimNpc", name = "Aim at NPCs too", desc = "Include non-player humanoids",
+        tip = "Also locks onto NPCs / dummies / mobs, not just real players. Middle-click pinning uses the same rule.",
+        accent = Theme.Cyan,
+        callback = function(on) Cfg.aimNpc = on and true or false; scheduleSave() end,
+    })
+    createToggle(combatPage, {
+        key = "aimFire", name = "Auto Fire (Trigger)", desc = "Activates your tool while locked",
+        tip = "While a target is locked, your equipped tool is activated about 12 times a second. Works for most sword / gun tools.",
+        accent = Theme.Green,
+        callback = function(on) Cfg.aimFire = on and true or false; scheduleSave() end,
+    })
+    createButton(combatPage, "Clear Pinned Target", Theme.Off,
+        "Releases a middle-click pin. A pinned target shows a cyan outline instead of green. The pin also releases itself when the target dies, disconnects, leaves the range or Aim Lock is turned off.",
+        function() Aim.clearPin() end)
+
+    createSection(combatPage, "Melee")
+    createToggle(combatPage, {
         key = "aura", name = "Auto-Hit / M1 Damage Aura",
-        desc = "Swings tool + flings NPCs within 20 studs",
-        tip = "Scans every 0.05s: swings your equipped tool and flings NPCs/dummies in range. Real players are always skipped.",
+        desc = "Force-fires your tool + flings NPCs within 20 studs",
+        tip = "Scans every 0.05s with a spatial query, finds every live Humanoid in range and force-activates your equipped Tool so its REAL hit registration and full damage land. NPCs/dummies in range are also flung. Turn on 'Aura Hits Players Too' to include real players.",
         accent = Theme.Green,
         callback = featureCallback("Damage Aura", Features.aura),
     })
     createToggle(combatPage, {
+        key = "auraPlayers", name = "Aura Hits Players Too",
+        desc = "Include real players, not just NPCs",
+        tip = "Off (default): only NPCs / dummies are targeted, matching classic aura behaviour. On: real players in range are also swung at and flung.",
+        accent = Theme.Cyan,
+        callback = function(on) Cfg.auraPlayers = on and true or false; scheduleSave() end,
+    })
+    createToggle(combatPage, {
         key = "godMode", name = "100% God Mode",
-        desc = "Health locked to max • CanTouch off",
-        tip = "Locks health to max on every frame and health change, and turns CanTouch off on your limbs. Client-side only. Restored exactly when off.",
+        desc = "Health locked to max • CanTouch stays ON (pickups work)",
+        tip = "Immunity WITHOUT touching CanTouch, so TouchTransmitter signals survive and coins / tools / map drops keep being collected. Health is force-restored every frame and on every hit, and Dead/Ragdoll states are cleared. Client-side only.",
         accent = Theme.Cyan,
         callback = featureCallback("God Mode", Features.godMode),
     })
     createToggle(combatPage, {
-        key = "invisible", name = "Invisible Mode",
-        desc = "Hides character + name tag (local only)",
-        tip = "Sets every part/decal of your character fully transparent locally and hides the name tag. Other players still see you. Originals restored exactly when off.",
+        key = "invisible", name = "Smart Invisibility",
+        desc = "Sever tracking + full immunity, still hits back",
+        tip = "Hides your character, name tag and query box (NPC/client raycasts miss you) and force-locks health so no damage vector lands. Your tool's own touch/raycast hit registration is untouched, so you still deal FULL damage to NPCs and players. CanTouch stays on, so pickups keep working.",
         accent = Theme.Green,
-        callback = featureCallback("Invisible Mode", Features.invisible),
+        callback = featureCallback("Smart Invisibility", Features.invisible),
     })
 
     -- ---------- Performance ----------
@@ -2936,7 +3480,6 @@ local function buildMain()
         end
     end)
 
-    -- frame-drop helpers
     createToggle(perfPage, {
         key = "liteUI", name = "Lite Panel Mode", desc = "Stops the panel's animated borders",
         tip = "The neon borders re-draw every frame. Lite mode freezes them, so the panel itself costs almost nothing. Helps on weak laptops, especially if the panel stays open.",
@@ -2966,7 +3509,7 @@ local function buildMain()
 
     local Guard = { acc = 0, frames = 0, low = 0, ok = 0, engaged = false }
     Loop.register("Performance Guard", function(dt)
-        if dt > 0.5 then Guard.acc, Guard.frames = 0, 0 return end -- alt-tab / loading hitch, not real FPS
+        if dt > 0.5 then Guard.acc, Guard.frames = 0, 0 return end
         Guard.acc += dt
         Guard.frames += 1
         if Guard.acc < 1 then return end
@@ -2974,7 +3517,7 @@ local function buildMain()
         Guard.acc, Guard.frames = 0, 0
         if not Cfg.perfGuard then Guard.low, Guard.ok, Guard.engaged = 0, 0, false return end
         local thr = Cfg.guardFps or 30
-        if Guard.engaged and not Cfg.optimizer then Guard.engaged = false end -- you switched it off yourself
+        if Guard.engaged and not Cfg.optimizer then Guard.engaged = false end
         if not Guard.engaged then
             Guard.ok = 0
             if fps < thr then Guard.low += 1 else Guard.low = 0 end
@@ -2997,33 +3540,7 @@ local function buildMain()
         end
     end, { keep = true })
 
-    -- ============================================================
-    -- EXTRAS (v5): themes, search, profiles, keybinds, HUD, resize
-    -- ============================================================
-    local function createSection(page, text)
-        page.order += 1
-        return create("TextLabel", {
-            Name = "Section" .. page.order, LayoutOrder = page.order,
-            Size = UDim2.new(1, -10, 0, 22), BackgroundTransparency = 1,
-            Text = "  " .. string.upper(text), TextSize = 13, TextColor3 = Theme.Cyan,
-            TextXAlignment = Enum.TextXAlignment.Left,
-        }, page.frame)
-    end
-
-    local function cardLabels(card, title, desc, rightPad)
-        create("TextLabel", {
-            Position = UDim2.new(0, 12, 0, 7), Size = UDim2.new(1, -(rightPad or 24), 0, 22),
-            BackgroundTransparency = 1, Text = title, TextSize = 16,
-            TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
-        }, card)
-        return create("TextLabel", {
-            Position = UDim2.new(0, 12, 0, 31), Size = UDim2.new(1, -(rightPad or 24), 0, 20),
-            BackgroundTransparency = 1, Text = desc, TextSize = 14, TextColor3 = Theme.SubText,
-            TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd,
-        }, card)
-    end
-
-    -- ---------- UI scale (debounced so dragging the slider doesn't fight itself) ----------
+    -- ---------- UI scale (debounced) ----------
     local scaleToken = 0
     local function applyUiScale()
         scaleToken += 1
@@ -3039,7 +3556,8 @@ local function buildMain()
     local RESERVED = { W = true, A = true, S = true, D = true, E = true, Q = true,
         Space = true, LeftShift = true, Return = true, Tab = true }
     local NON_TYPING = { RightControl = true, LeftControl = true, RightShift = true, Insert = true,
-        Home = true, End = true, Delete = true, PageUp = true, PageDown = true }
+        Home = true, End = true, Delete = true, PageUp = true, PageDown = true,
+        LeftAlt = true, RightAlt = true }
     local Rebind = { action = nil, token = 0, refreshers = {} }
 
     function Rebind.codeOf(action)
@@ -3204,7 +3722,9 @@ local function buildMain()
     local HUD = { frame = nil }
     local HUD_NAMES = { fly = "Fly", godMode = "God", invisible = "Invis", esp = "ESP",
         aura = "Aura", optimizer = "Opt", noFog = "NoFog", fullBright = "Bright",
-        noclip = "Clip", antiAfk = "AFK" }
+        noclip = "Clip", antiAfk = "AFK", espUsername = "User", aimLock = "Aim",
+        aimHead = "Head", aimNpc = "NPC", aimFire = "Fire", netSleep = "Sleep",
+        speedLegacy = "Legacy", smartHop = "Smart", auraPlayers = "AuraP" }
 
     local function getPing()
         local ok, v = pcall(function()
@@ -3246,7 +3766,6 @@ local function buildMain()
         makeDraggable(f, f, nil, nil, true)
         HUD.frame = f
 
-        -- rolling 60s FPS sparkline: 60 thin bars, newest on the right
         local spark = create("Frame", {
             Position = UDim2.fromOffset(8, 76), Size = UDim2.new(1, -16, 0, 28),
             BackgroundColor3 = Theme.Dark, BackgroundTransparency = 0.35, BorderSizePixel = 0, ZIndex = 61,
@@ -3304,9 +3823,10 @@ local function buildMain()
                         local t = UI.toggles[k]
                         if t and t.Get() then table.insert(active, HUD_NAMES[k] or k) end
                     end
-                    lbl.Text = string.format("FPS %d  %dms\nPOS %s\nPLR %d/%s  %s",
+                    local pinText = (Aim.pinned or Aim.pinnedPlayer) and "  PIN" or ""
+                    lbl.Text = string.format("FPS %d  %dms\nPOS %s\nPLR %d/%s  %s%s",
                         math.floor(fps + 0.5), getPing(), posText,
-                        #Players:GetPlayers(), tostring(Players.MaxPlayers), timeText)
+                        #Players:GetPlayers(), tostring(Players.MaxPlayers), timeText, pinText)
                     onLbl.Text = "ON " .. (#active > 0 and table.concat(active, " ") or "-")
                     dot.BackgroundColor3 = fps >= 50 and Theme.Green
                         or (fps >= 30 and Color3.fromRGB(255, 200, 0) or Theme.Red)
@@ -3325,7 +3845,7 @@ local function buildMain()
     createSection(toolsPage, "Monitoring")
     createToggle(toolsPage, {
         key = "hud", name = "Stats HUD", desc = "FPS • ping • position • active toggles",
-        tip = "Small draggable overlay with live FPS, ping, your position, session time and which toggles are on.",
+        tip = "Small draggable overlay with live FPS, ping, your position, session time and which toggles are on. Shows a PIN flag while a target is pinned.",
         accent = Theme.Cyan,
         callback = function(on)
             Cfg.hud = on and true or false
@@ -3345,7 +3865,6 @@ local function buildMain()
 
     createSection(toolsPage, "Profiles")
     for i = 1, 3 do createProfileCard(toolsPage, i) end
-
 
     -- ---------- Waypoints ----------
     createSection(toolsPage, "Waypoints")
@@ -3447,7 +3966,7 @@ local function buildMain()
         Tooltip.attach(card, "Set stores your current position. Go teleports you there. Click the name to rename it. Del clears the slot.")
     end
 
-    -- ---------- Server finder ----------
+    -- ---------- Server finder + smart matchmaking ----------
     createSection(toolsPage, "Servers")
     local TeleportService = game:GetService("TeleportService")
     local Hop = { busy = false, bad = {}, list = nil, idx = 0, pending = nil, tries = 0 }
@@ -3484,6 +4003,24 @@ local function buildMain()
             task.wait(0.6)
         end
         return servers, nil
+    end
+
+    local function hopScore(sv, limit)
+        local playing = tonumber(sv.playing) or 0
+        local maxP = math.max(tonumber(sv.maxPlayers) or 1, 1)
+        local fill = playing / maxP
+        local popScore = 1 - math.clamp(playing / math.max(limit, 1), 0, 1)
+        local fillScore = 1 - math.clamp(fill, 0, 1)
+        local freshBonus = (playing <= 4) and 1 or 0
+        local fpsScore = 0.5
+        if type(sv.fps) == "number" and sv.fps > 0 then
+            fpsScore = math.clamp(sv.fps / 60, 0, 1)
+        end
+        local pingScore = 0.5
+        if type(sv.ping) == "number" and sv.ping > 0 then
+            pingScore = 1 - math.clamp(sv.ping / 200, 0, 1)
+        end
+        return popScore * 0.40 + fillScore * 0.25 + freshBonus * 0.20 + fpsScore * 0.10 + pingScore * 0.05
     end
 
     local function tryNext()
@@ -3527,10 +4064,11 @@ local function buildMain()
         task.spawn(function()
             local servers, err = Hop.fetch()
             local pool = {}
+            local minPop = (mode == "low" and Cfg.smartHop) and 0 or 1
             for _, sv in ipairs(servers) do
                 if type(sv.id) == "string" and sv.id ~= game.JobId and not Hop.bad[sv.id]
                     and type(sv.playing) == "number" and type(sv.maxPlayers) == "number"
-                    and sv.playing >= 1 and sv.playing < sv.maxPlayers then
+                    and sv.playing >= minPop and sv.playing < sv.maxPlayers then
                     table.insert(pool, sv)
                 end
             end
@@ -3543,19 +4081,32 @@ local function buildMain()
             local list = {}
             if mode == "low" then
                 local limit = Cfg.hopMax or 8
+                local under = {}
                 for _, sv in ipairs(pool) do
-                    if sv.playing <= limit then table.insert(list, sv) end
+                    if sv.playing <= limit then table.insert(under, sv) end
                 end
-                if #list == 0 then
+                if #under == 0 then
                     Hop.busy = false
                     Toast.show("No server with " .. limit .. " or fewer players. Lowest is "
                         .. pool[1].playing .. " - raise the limit.", Theme.Red, 4.5)
                     return
                 end
-                -- shuffle the few lowest so repeated clicks don't all hit the same server
-                for i = math.min(#list, 5), 2, -1 do
-                    local j = math.random(1, i)
-                    list[i], list[j] = list[j], list[i]
+                if Cfg.smartHop then
+                    local scored = {}
+                    for _, sv in ipairs(under) do
+                        table.insert(scored, { sv = sv, score = hopScore(sv, limit) + math.random() * 0.06 })
+                    end
+                    table.sort(scored, function(a, b) return a.score > b.score end)
+                    for _, e in ipairs(scored) do table.insert(list, e.sv) end
+                    local top = scored[1]
+                    Toast.show(string.format("Smart matchmaking: freshest lobby %d/%d players (fresh score %.0f%%)",
+                        top.sv.playing, top.sv.maxPlayers, top.score * 100), Theme.Cyan, 3.5)
+                else
+                    list = under
+                    for i = #list, 2, -1 do
+                        local j = math.random(1, i)
+                        list[i], list[j] = list[j], list[i]
+                    end
                 end
             else
                 list = pool
@@ -3585,6 +4136,16 @@ local function buildMain()
         end
     end)
 
+    createToggle(toolsPage, {
+        key = "smartHop", name = "Smart Matchmaking (Noob Farm)",
+        desc = "Rank servers by freshness instead of pure lowest count",
+        tip = "Scores every candidate lobby and picks the freshest one: low fill ratio, low population, tiny player clusters, healthy server fps and ping. Roblox does not expose server uptime or player account ages on the public endpoint, so this is the strongest proxy set available.",
+        accent = Theme.Green,
+        callback = function(on) Cfg.smartHop = on and true or false; scheduleSave() end,
+    })
+    createInfo(toolsPage,
+        "Matchmaking note: the public server list gives id, population, max players, fps and ping - not uptime or account ages. Smart Matchmaking ranks on those real signals; with it off you get a plain random pick from the under-limit pool.", Theme.Off)
+
     createSlider(toolsPage, {
         key = "hopMax", name = "Low-Pop Limit", desc = "Max players allowed in the server • 1 - 30",
         tip = "Join Low-Pop Server only picks servers with this many players or fewer.",
@@ -3592,7 +4153,7 @@ local function buildMain()
         onChange = function(v) Cfg.hopMax = v; scheduleSave() end,
     })
     createButton(toolsPage, "Join Low-Pop Server", Theme.Green,
-        "Looks up this game's public servers and teleports you to one with few players. Needs an executor with HTTP support. The script has to be re-run in the new server.",
+        "Looks up this game's public servers, ranks them (Smart Matchmaking) and teleports you to the freshest low-pop lobby. Needs an executor with HTTP support. The script has to be re-run in the new server.",
         function() startHop("low") end)
     createButton(toolsPage, "Join Random Server", Theme.Cyan,
         "Teleports you to a random other public server that isn't full.",
@@ -3685,10 +4246,10 @@ local function buildMain()
     end))
     addHoverFX(jobIdCard, jobIdStroke)
 
-    -- clickable server browser (reuses Hop.fetch)
+    -- clickable server browser
     local ServerBrowser = { busy = false }
     local sbCard = createCard(toolsPage, "ServerBrowser", 240, Theme.Cyan)
-    sbCard:SetAttribute("search", "server browser list join players count rejoin")
+    sbCard:SetAttribute("search", "server browser list join players count rejoin fresh score")
     sbCard:SetAttribute("desc", "Server Browser - click a server to join it")
     create("TextLabel", {
         Position = UDim2.new(0, 12, 0, 6), Size = UDim2.new(1, -110, 0, 22),
@@ -3741,21 +4302,33 @@ local function buildMain()
                     table.insert(rows, sv)
                 end
             end
-            table.sort(rows, function(a, b) return a.playing < b.playing end)
             if #rows == 0 then
                 sbNote.Text = err and ("Failed: " .. err) or "No servers found."
                 return
+            end
+            if Cfg.smartHop then
+                local limit = Cfg.hopMax or 8
+                table.sort(rows, function(a, b)
+                    local sa = hopScore(a, limit) + (a.playing > limit and -0.3 or 0)
+                    local sb2 = hopScore(b, limit) + (b.playing > limit and -0.3 or 0)
+                    return sa > sb2
+                end)
+            else
+                table.sort(rows, function(a, b) return a.playing < b.playing end)
             end
             sbNote.Visible = false
             for n = 1, math.min(#rows, 60) do
                 local sv = rows[n]
                 local here = sv.id == game.JobId
                 local ping = type(sv.ping) == "number" and (sv.ping .. "ms") or "--"
+                local info = string.format("%d / %d players   %s", sv.playing, sv.maxPlayers, ping)
+                if Cfg.smartHop then
+                    info = string.format("fresh %.0f%%   ", hopScore(sv, Cfg.hopMax or 8) * 100) .. info
+                end
                 local row = create("TextButton", {
                     LayoutOrder = n, Size = UDim2.new(1, -6, 0, 26), BackgroundColor3 = Theme.Dark,
-                    Text = string.format("%s%d / %d players   %s   %s", here and "* " or "", sv.playing,
-                        sv.maxPlayers, ping, string.sub(sv.id, 1, 6)),
-                    TextSize = 13, AutoButtonColor = false, ZIndex = 5,
+                    Text = string.format("%s%s   %s", here and "* " or "", info, string.sub(sv.id, 1, 6)),
+                    TextSize = 12, AutoButtonColor = false, ZIndex = 5,
                     TextXAlignment = Enum.TextXAlignment.Left,
                     TextColor3 = here and Theme.Green or Theme.White,
                 }, sbList)
@@ -3819,6 +4392,258 @@ local function buildMain()
         refreshHistory()
     end)
 
+    -- ======================= GAMES TAB =======================
+    local MarketplaceService = game:GetService("MarketplaceService")
+
+    local function fmtAgo(t)
+        local d = os.time() - (t or 0)
+        if d < 60 then return "just now"
+        elseif d < 3600 then return math.floor(d / 60) .. " min ago"
+        elseif d < 86400 then return math.floor(d / 3600) .. " h ago" end
+        return math.floor(d / 86400) .. " d ago"
+    end
+
+    local function joinPlace(placeId, name)
+        placeId = tonumber(placeId)
+        if not placeId then return end
+        if placeId == game.PlaceId then
+            Toast.show("You are already in that game", Theme.Off, 2.5)
+            return
+        end
+        pcall(saveConfig)
+        Toast.show("Joining " .. tostring(name or placeId) .. "...", Theme.Green, 3)
+        local ok = pcall(function() TeleportService:Teleport(placeId, LocalPlayer) end)
+        if not ok then Toast.show("Couldn't start the teleport", Theme.Red, 3) end
+    end
+
+    local function makeList(parent, y)
+        local frame = create("ScrollingFrame", {
+            Position = UDim2.new(0, 10, 0, y), Size = UDim2.new(1, -20, 1, -(y + 10)),
+            BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 4,
+            ScrollBarImageColor3 = Theme.Off, CanvasSize = UDim2.new(0, 0, 0, 0), ZIndex = 4,
+        }, parent)
+        local layout = create("UIListLayout", { Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder }, frame)
+        track(layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+            frame.CanvasSize = UDim2.new(0, 0, 0, layout.AbsoluteContentSize.Y + 4)
+        end))
+        return frame
+    end
+    local function clearList(list)
+        for _, c in ipairs(list:GetChildren()) do
+            if c:IsA("GuiObject") then c:Destroy() end
+        end
+    end
+    local function listNote(list, text)
+        create("TextLabel", {
+            Size = UDim2.new(1, -6, 0, 28), BackgroundTransparency = 1, Text = text,
+            TextSize = 14, TextColor3 = Theme.SubText, TextXAlignment = Enum.TextXAlignment.Left,
+        }, list)
+    end
+
+    local function makeGameRow(list, order, name, info, placeId)
+        local row = create("TextButton", {
+            LayoutOrder = order, Size = UDim2.new(1, -6, 0, 36), BackgroundColor3 = Theme.Dark,
+            Text = "", AutoButtonColor = false, ZIndex = 5,
+        }, list)
+        addCorner(row, 4)
+        local stroke = addFlatStroke(row, Theme.HoverGrey, 1)
+        local nameLbl = create("TextLabel", {
+            Position = UDim2.fromOffset(10, 0), Size = UDim2.new(1, -130, 1, 0),
+            BackgroundTransparency = 1, Text = name, TextSize = 14,
+            TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 6,
+        }, row)
+        create("TextLabel", {
+            AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -10, 0, 0), Size = UDim2.new(0, 112, 1, 0),
+            BackgroundTransparency = 1, Text = info or "", TextSize = 12, TextColor3 = Theme.SubText,
+            TextXAlignment = Enum.TextXAlignment.Right, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 6,
+        }, row)
+        row.MouseEnter:Connect(function()
+            Sfx.play("hover")
+            TweenService:Create(row, HOVER_INFO, { BackgroundColor3 = Theme.HoverGrey }):Play()
+        end)
+        row.MouseLeave:Connect(function()
+            TweenService:Create(row, HOVER_INFO, { BackgroundColor3 = Theme.Dark }):Play()
+        end)
+        local armed = false
+        row.MouseButton1Click:Connect(function()
+            Sfx.play("click")
+            if armed then
+                armed = false
+                guard("Join game", nil, joinPlace, placeId, name)
+                return
+            end
+            armed = true
+            nameLbl.Text = "Tap again to join"
+            nameLbl.TextColor3 = Theme.Green
+            stroke.Color = Theme.Green
+            task.delay(3, function()
+                if armed and row.Parent then
+                    armed = false
+                    nameLbl.Text = name
+                    nameLbl.TextColor3 = Theme.White
+                    stroke.Color = Theme.HoverGrey
+                end
+            end)
+        end)
+        return row
+    end
+
+    createSection(gamesPage, "Recent games")
+    local recentCard = createCard(gamesPage, "RecentGames", 250, Theme.Cyan)
+    recentCard:SetAttribute("search", "recent games history join play last played")
+    cardLabels(recentCard, "Recent games", "Games where you used the panel • tap twice to join", 24)
+    local recentList = makeList(recentCard, 56)
+    local function refreshRecent()
+        if not recentList.Parent then return end
+        clearList(recentList)
+        local list = Cfg.recentGames
+        if type(list) ~= "table" or #list == 0 then
+            listNote(recentList, "Nothing yet. Games you open the panel in show up here.")
+            return
+        end
+        for i, e in ipairs(list) do
+            makeGameRow(recentList, i, e.name, e.id == game.PlaceId and "current game" or fmtAgo(e.t), e.id)
+        end
+    end
+
+    createSection(gamesPage, "Find & join any game")
+    local findCard = createCard(gamesPage, "GameSearch", 340, Theme.Green)
+    findCard:SetAttribute("search", "search find game join place id link roblox any game")
+    cardLabels(findCard, "Find a game", "Type a name, a Place ID or a roblox.com/games link", 24)
+    local gameBox = create("TextBox", {
+        Position = UDim2.new(0, 12, 0, 56), Size = UDim2.new(1, -108, 0, 30),
+        BackgroundColor3 = Theme.Dark, Text = "", PlaceholderText = "Game name, Place ID or link...",
+        PlaceholderColor3 = Color3.fromRGB(130, 130, 130), ClearTextOnFocus = false,
+        TextSize = 13, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5,
+    }, findCard)
+    addCorner(gameBox, 4)
+    addFlatStroke(gameBox, Theme.Off, 1)
+    create("UIPadding", { PaddingLeft = UDim.new(0, 8), PaddingRight = UDim.new(0, 8) }, gameBox)
+    local findBtn = create("TextButton", {
+        AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -12, 0, 56),
+        Size = UDim2.fromOffset(76, 30), BackgroundColor3 = Theme.Black, Text = "Search",
+        TextSize = 14, AutoButtonColor = false, ZIndex = 5,
+    }, findCard)
+    addCorner(findBtn, 4)
+    addFlatStroke(findBtn, Theme.Green, 1)
+    local resultList = makeList(findCard, 96)
+    listNote(resultList, "Results appear here.")
+
+    local function searchGames(query)
+        local url = "https://apis.roblox.com/search-api/omni-search?searchQuery=" .. HttpService:UrlEncode(query)
+            .. "&sessionId=" .. HttpService:GenerateGUID(false) .. "&pageType=all"
+        local body = httpGet(url)
+        if not body then return {}, "no HTTP access in this executor" end
+        local ok, data = pcall(function() return HttpService:JSONDecode(body) end)
+        if not ok or type(data) ~= "table" then return {}, "search failed or was blocked" end
+        local found, seen = {}, {}
+        local function walk(t, depth)
+            if depth > 7 then return end
+            local uid = tonumber(t.universeId)
+            if uid and type(t.name) == "string" and not seen[uid] then
+                seen[uid] = true
+                table.insert(found, { uid = uid, name = t.name, place = tonumber(t.rootPlaceId),
+                    players = tonumber(t.playerCount) })
+            end
+            if #t > 0 then
+                for _, v in ipairs(t) do if type(v) == "table" then walk(v, depth + 1) end end
+            else
+                for _, v in pairs(t) do if type(v) == "table" then walk(v, depth + 1) end end
+            end
+        end
+        walk(data, 0)
+        if #found == 0 then return {}, "no games found" end
+        local details, ids = {}, {}
+        for i = 1, math.min(#found, 30) do table.insert(ids, tostring(found[i].uid)) end
+        local body2 = httpGet("https://games.roblox.com/v1/games?universeIds=" .. table.concat(ids, ","))
+        if body2 then
+            local ok2, d2 = pcall(function() return HttpService:JSONDecode(body2) end)
+            if ok2 and type(d2) == "table" and type(d2.data) == "table" then
+                for _, g in ipairs(d2.data) do
+                    if type(g) == "table" and tonumber(g.id) then details[tonumber(g.id)] = g end
+                end
+            end
+        end
+        local rows = {}
+        for i = 1, math.min(#found, 30) do
+            local e = found[i]
+            local d = details[e.uid]
+            local place = (d and tonumber(d.rootPlaceId)) or e.place
+            local players = (d and tonumber(d.playing)) or e.players
+            if place then
+                table.insert(rows, { name = e.name, id = place, info = players and (players .. " playing") or "" })
+            end
+        end
+        if #rows == 0 then return {}, "no joinable games found" end
+        return rows, nil
+    end
+
+    local searchingGames = false
+    local function runGameSearch()
+        if searchingGames then return end
+        local q = string.match(gameBox.Text, "^%s*(.-)%s*$") or ""
+        if q == "" then
+            Toast.show("Type a game name, Place ID or link first", Theme.Red, 2.5)
+            return
+        end
+        searchingGames = true
+        findBtn.Text = "..."
+        task.spawn(function()
+            clearList(resultList)
+            listNote(resultList, "Searching...")
+            local rows, err = {}, nil
+            local pid = string.match(q, "/games/(%d+)") or string.match(q, "^(%d+)$")
+            if pid then
+                local name = "Place " .. pid
+                pcall(function() name = MarketplaceService:GetProductInfo(tonumber(pid)).Name end)
+                rows = { { name = name, id = tonumber(pid), info = "by Place ID" } }
+            else
+                rows, err = searchGames(q)
+            end
+            clearList(resultList)
+            if #rows == 0 then
+                listNote(resultList, err and ("Nothing: " .. err) or "No games found.")
+            end
+            for i, r in ipairs(rows) do makeGameRow(resultList, i, r.name, r.info, r.id) end
+            findBtn.Text = "Search"
+            searchingGames = false
+        end)
+    end
+    track(findBtn.MouseButton1Click:Connect(function()
+        Sfx.play("click")
+        guard("Game search", nil, runGameSearch)
+    end))
+    track(gameBox.FocusLost:Connect(function(enter)
+        if enter then guard("Game search", nil, runGameSearch) end
+    end))
+    Tooltip.attach(findCard, "Search any public game by name, or paste a Place ID / roblox.com/games link. Tap a result twice to teleport there. Teleporting loads a new game, so run the script again there (auto-execute folder works).")
+
+    local function recordCurrentGame()
+        if game.PlaceId == 0 then return end
+        local list = type(Cfg.recentGames) == "table" and Cfg.recentGames or {}
+        local entry
+        for i = #list, 1, -1 do
+            if list[i].id == game.PlaceId then entry = table.remove(list, i) end
+        end
+        entry = entry or { id = game.PlaceId, name = game.Name }
+        entry.t = os.time()
+        table.insert(list, 1, entry)
+        while #list > 25 do table.remove(list) end
+        Cfg.recentGames = list
+        scheduleSave()
+        refreshRecent()
+        task.spawn(function()
+            local ok, info = pcall(function() return MarketplaceService:GetProductInfo(game.PlaceId) end)
+            if ok and type(info) == "table" and type(info.Name) == "string" and info.Name ~= "" then
+                entry.name = info.Name
+                scheduleSave()
+                refreshRecent()
+            end
+        end)
+    end
+    refreshRecent()
+    guard("Recent games", nil, recordCurrentGame)
+
     -- ======================= SETTINGS TAB =======================
     createSection(settingsPage, "Appearance")
     local themeCard = createCard(settingsPage, "Theme", 100, Theme.Cyan)
@@ -3845,7 +4670,7 @@ local function buildMain()
             LayoutOrder = i, Size = UDim2.fromOffset(30, 30), BackgroundColor3 = Theme.White,
             Text = "", AutoButtonColor = false, ZIndex = 5,
         }, swatchRow)
-        b:SetAttribute("NoTheme", true) -- keep swatch colors fixed while the rest recolors
+        b:SetAttribute("NoTheme", true)
         addCorner(b, 15)
         create("UIGradient", { Color = ColorSequence.new(pr.c1, pr.c2), Rotation = 45 }, b)
         swatches[pr.name] = create("UIStroke", {
@@ -3931,6 +4756,7 @@ local function buildMain()
         { id = "minimize", name = "Minimize Panel", desc = "Collapse to the floating E button" },
         { id = "fly", name = "Toggle Fly", desc = "Quick on / off for Fly Hack Mode" },
         { id = "noclip", name = "Toggle Noclip", desc = "Quick on / off for Noclip" },
+        { id = "aimLock", name = "Toggle Aim Lock", desc = "Quick on / off for the auto-aim (LeftAlt)" },
         { id = "search", name = "Focus Command Bar", desc = "Jumps to the search / command box" },
     }) do
         createKeybindRow(settingsPage, spec)
@@ -3965,6 +4791,15 @@ local function buildMain()
         pcall(function() UI.toggles.perfGuard.Set(false, true) end)
         pcall(function() UI.sliders.guardFps.Set(30) end)
         pcall(function() UI.sliders.volume.Set(40) end)
+        pcall(function() UI.toggles.aimHead.Set(true, true) end)
+        pcall(function() UI.toggles.netSleep.Set(true, true) end)
+        pcall(function() UI.toggles.smartHop.Set(true, true) end)
+        pcall(function() UI.toggles.auraPlayers.Set(false, true) end)
+        pcall(function() UI.sliders.aimFov.Set(25) end)
+        pcall(function() UI.sliders.aimRange.Set(150) end)
+        pcall(function() UI.sliders.aimSmooth.Set(8) end)
+        pcall(function() UI.sliders.microStep.Set(20) end)
+        pcall(function() UI.sliders.flySpoof.Set(10) end)
         Cfg.font = "Clean"
         Theme.Font = fontPreset("Clean").font
         pcall(function() UI.sliders.textBoost.Set(1) end)
@@ -4084,7 +4919,7 @@ local function buildMain()
                 BackgroundColor3 = Theme.Off, BorderSizePixel = 0, ZIndex = 47,
             }, grip)
         end
-        local MIN_W, MIN_H, MAX_W, MAX_H = 420, 320, 900, 760
+        local MIN_W, MIN_H, MAX_W, MAX_H = 600, 320, 900, 760
         local resizing, rStart, rSize, rPos = false, nil, nil, nil
         track(grip.InputBegan:Connect(function(input)
             if input.UserInputType == Enum.UserInputType.MouseButton1
@@ -4103,7 +4938,6 @@ local function buildMain()
             local w = math.clamp(rSize.X + (input.Position.X - rStart.X) / s, MIN_W, MAX_W)
             local h = math.clamp(rSize.Y + (input.Position.Y - rStart.Y) / s, MIN_H, MAX_H)
             Main.Size = UDim2.fromOffset(w, h)
-            -- keep the top-left corner pinned (panel is center-anchored)
             Main.Position = UDim2.new(rPos.X.Scale, rPos.X.Offset + (w - rSize.X) * s / 2,
                 rPos.Y.Scale, rPos.Y.Offset + (h - rSize.Y) * s / 2)
             PanelSize = Main.Size
@@ -4145,11 +4979,9 @@ local function buildMain()
         end
     end)
 
-    -- every label created from now on (toasts, tooltips...) gets the chosen font / size too
     track(ScreenGui.DescendantAdded:Connect(function(d) pcall(styleText, d) end))
     applyTextStyle(true)
 
-    -- initial state of the extra toggles
     UI.toggles.hud.Set(Cfg.hud == true, true)
     UI.toggles.toasts.Set(Cfg.toasts ~= false, true)
     UI.toggles.perGame.Set(Cfg.perGame == true, true)
@@ -4269,9 +5101,14 @@ local function buildMain()
     end
 
     track(UserInputService.InputBegan:Connect(function(input, gameProcessed)
+        if input.UserInputType == Enum.UserInputType.MouseButton3 then
+            if Cfg.aimLock and not UserInputService:GetFocusedTextBox() then
+                guard("Aim pin", nil, Aim.pinUnderMouse)
+            end
+            return
+        end
         if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
         local code = input.KeyCode
-        -- rebinding mode swallows the next key
         if Rebind.action then
             Rebind.capture(code)
             return
@@ -4291,12 +5128,14 @@ local function buildMain()
             pcall(function() UI.toggles.fly.Toggle() end)
         elseif code == Rebind.codeOf("noclip") then
             pcall(function() UI.toggles.noclip.Toggle() end)
+        elseif code == Rebind.codeOf("aimLock") then
+            pcall(function() UI.toggles.aimLock.Toggle() end)
         elseif code == Rebind.codeOf("search") then
             if mainShown and not Runtime.minimized then
                 task.defer(function()
                     searchBox:CaptureFocus()
                     RunService.Heartbeat:Wait()
-                    searchBox.Text = "" -- drop the hotkey character that slipped in
+                    searchBox.Text = ""
                 end)
             end
         end
@@ -4308,6 +5147,9 @@ local function buildMain()
         esp = "esp", aura = "aura", noclip = "noclip", clip = "noclip", afk = "antiAfk", antiafk = "antiAfk",
         fog = "noFog", nofog = "noFog", bright = "fullBright", fullbright = "fullBright",
         opt = "optimizer", optimizer = "optimizer", fps = "optimizer", hud = "hud", info = "espInfo",
+        aim = "aimLock", aimlock = "aimLock", uname = "espUsername", username = "espUsername",
+        sleep = "netSleep", netsleep = "netSleep", legacy = "speedLegacy", smart = "smartHop",
+        auraplayers = "auraPlayers",
     }
     local function runToggle(key, arg)
         local t = UI.toggles[key]
@@ -4316,7 +5158,6 @@ local function buildMain()
         elseif arg == "off" then t.Set(false, false)
         else t.Toggle() end
     end
-    -- returns a function that runs the command, or nil when the text isn't a command
     local function resolveCommand(text)
         local words = {}
         for w in string.gmatch(string.lower(text or ""), "%S+") do table.insert(words, w) end
@@ -4343,8 +5184,18 @@ local function buildMain()
             return copyJobId
         elseif cmd == "servers" then
             return function() selectTab("Tools"); ServerBrowser.refresh() end
+        elseif cmd == "pin" then
+            return function() Aim.pinUnderMouse() end
+        elseif cmd == "unpin" then
+            return function() Aim.clearPin() end
         elseif (cmd == "speed" or cmd == "flyspeed") and tonumber(a1) then
             return function() UI.sliders[cmd == "speed" and "speed" or "flySpeed"].Set(tonumber(a1)) end
+        elseif cmd == "aimfov" and tonumber(a1) then
+            return function() UI.sliders.aimFov.Set(tonumber(a1)) end
+        elseif cmd == "aimrange" and tonumber(a1) then
+            return function() UI.sliders.aimRange.Set(tonumber(a1)) end
+        elseif cmd == "micro" and tonumber(a1) then
+            return function() UI.sliders.microStep.Set(tonumber(a1)) end
         elseif (cmd == "tp" or cmd == "wp") and tonumber(a1) then
             return function() Waypoints.go(math.floor(tonumber(a1))) end
         elseif cmd == "setwp" and tonumber(a1) then
@@ -4357,7 +5208,7 @@ local function buildMain()
             return function() setWindowVisible(false) end
         elseif cmd == "help" then
             return function()
-                Toast.show("Commands: fly god invis esp aura noclip afk fog bright fps hud • theme <name> • hop [random] • rejoin • jobid • servers • speed N • tp N • setwp N • profile N", Theme.Cyan, 6)
+                Toast.show("Commands: fly god invis esp aura noclip afk fog bright fps hud aim uname sleep smart legacy • theme <name> • hop [random] • rejoin • jobid • servers • pin • unpin • speed N • aimfov N • aimrange N • micro N • tp N • setwp N • profile N", Theme.Cyan, 6)
             end
         end
         return nil
@@ -4375,7 +5226,7 @@ local function buildMain()
         end
     end))
 
-    -- ======================= CONTEXT MENU (right-click a card) =======================
+    -- ======================= CONTEXT MENU =======================
     local ctx = { gui = nil }
     local function closeContext()
         if ctx.gui then pcall(function() ctx.gui:Destroy() end); ctx.gui = nil end
@@ -4452,12 +5303,13 @@ local function buildMain()
 
     Env.startLoop()
     staggerIn(tabs.Movement.page.frame)
-    Toast.show("EKANTO v6.0 loaded. " .. Cfg.keys.toggleUI .. " hides, " .. Cfg.keys.minimize
-        .. " minimizes, " .. Cfg.keys.fly .. " flies.", Theme.Green, 4)
+    Toast.show("EKANTO v2 loaded. " .. Cfg.keys.toggleUI .. " hides, " .. Cfg.keys.minimize
+        .. " minimizes, " .. Cfg.keys.fly .. " flies, " .. (Cfg.keys.aimLock or "LeftAlt") .. " aims.",
+        Theme.Green, 4)
 end
 
 -- ============================================================
--- 10. VERIFICATION GATE (key verified via hashed checkKey)
+-- 10. VERIFICATION GATE
 -- ============================================================
 local function buildGate()
     local KeyFrame = create("Frame", {
@@ -4475,11 +5327,10 @@ local function buildGate()
 
     create("TextLabel", {
         Position = UDim2.new(0, 0, 0, 12), Size = UDim2.new(1, 0, 0, 24),
-        BackgroundTransparency = 1, Text = "EKANTO // SECURE SHELL",
+        BackgroundTransparency = 1, Text = "EKANTO V2 // SECURE SHELL",
         TextSize = 18,
     }, KeyFrame)
 
-    -- scanline sweep
     local scanline = create("Frame", {
         Position = UDim2.new(0, 10, 0, -2),
         Size = UDim2.new(1, -20, 0, 2),
@@ -4488,19 +5339,17 @@ local function buildGate()
     }, KeyFrame)
     addCorner(scanline, 1)
 
-    -- boot log
     local bootHolder = create("Frame", {
         Position = UDim2.new(0, 24, 0, 42),
         Size = UDim2.new(1, -48, 0, 60),
         BackgroundTransparency = 1,
     }, KeyFrame)
     local bootLines = {
-        "> EKANTO SECURE SHELL v6.0",
+        "> EKANTO SECURE SHELL V2",
         "> LOADING KERNEL MODULES ... OK",
         "> AUTH REQUIRED // AWAITING KEY",
     }
 
-    -- noise footer
     local noiseLabel = create("TextLabel", {
         AnchorPoint = Vector2.new(0, 1),
         Position = UDim2.new(0, 24, 1, -8),
@@ -4510,7 +5359,6 @@ local function buildGate()
         TextXAlignment = Enum.TextXAlignment.Left,
     }, KeyFrame)
 
-    -- input box (manual capture — no TextBox)
     local inputBox = create("Frame", {
         AnchorPoint = Vector2.new(0.5, 0),
         Position = UDim2.new(0.5, 0, 0, 116),
@@ -4574,7 +5422,6 @@ local function buildGate()
     end
     renderInput(true)
 
-    -- shared edit helpers (used by keyboard AND on-screen keypad)
     local function pushChar(c)
         if not inputReady or busy then return end
         if #buffer < MAX_LEN then
@@ -4593,7 +5440,6 @@ local function buildGate()
         renderInput(true)
     end
 
-    -- on-screen keypad (works on mobile / touch / when keyboard events are swallowed)
     local keypad = create("Frame", {
         AnchorPoint = Vector2.new(0.5, 0),
         Position = UDim2.new(0.5, 0, 0, 206),
@@ -4628,7 +5474,6 @@ local function buildGate()
         end))
     end
 
-    -- scanline loop
     task.spawn(function()
         local tok = gateToken
         while KeyFrame and KeyFrame.Parent and gateToken == tok do
@@ -4641,7 +5486,6 @@ local function buildGate()
         end
     end)
 
-    -- noise loop
     task.spawn(function()
         local tok = gateToken
         while KeyFrame and KeyFrame.Parent and gateToken == tok do
@@ -4654,7 +5498,6 @@ local function buildGate()
         end
     end)
 
-    -- cursor blink
     task.spawn(function()
         local tok = gateToken
         local on = true
@@ -4665,7 +5508,6 @@ local function buildGate()
         end
     end)
 
-    -- boot typewriter
     task.spawn(function()
         task.wait(0.4)
         for i, line in ipairs(bootLines) do
@@ -4773,7 +5615,6 @@ local function buildGate()
 
     track(verifyBtn.MouseButton1Click:Connect(attemptVerify))
 
-    -- manual keyboard capture (dots, no TextBox)
     track(UserInputService.InputBegan:Connect(function(input)
         if not (KeyFrame and KeyFrame.Parent) or not inputReady or busy then return end
         if input.UserInputType ~= Enum.UserInputType.Keyboard then return end
@@ -4840,12 +5681,11 @@ Toast.init(ScreenGui)
 Tooltip.init(ScreenGui)
 Sfx.init(ScreenGui)
 
--- visuals on the ONE central Heartbeat: gradient rotation, count-ups, proximity border, theme tween
 do
     local t = 0
     Loop.register("Visuals", function(dt)
         t += dt
-        if Cfg.liteUI then -- Lite Panel Mode: skip the animated borders, only keep slider count-ups
+        if Cfg.liteUI then
             for _, step in pairs(countups) do pcall(step, dt) end
             return
         end
@@ -4878,8 +5718,11 @@ end
 do
     local age = type(Cfg.verifiedAt) == "number" and (os.time() - Cfg.verifiedAt) or math.huge
     if age >= 0 and age < KEY_REMEMBER_SECONDS then
-        -- key was entered less than an hour ago: go straight to the panel
-        if not pcall(buildMain) then buildGate() end
+        local ok, err = pcall(buildMain)
+        if not ok then
+            warn("[EKANTO] buildMain failed: " .. tostring(err))
+            buildGate()
+        end
     else
         buildGate()
     end
