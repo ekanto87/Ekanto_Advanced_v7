@@ -1,8 +1,9 @@
 --[[
-    EKANTO V2.2 "AURORA"  —  PREMIUM UI BUILD  +  MOVEMENT HARDENING
-    + DARKNESS FIX (CanvasGroup gradient tint)
-    + LAYOUT / BUGFIX PASS (gate overlap, toast nil-ref, search overlap)
-    + "AJKE KHELSO" session timer REMOVED
+    EKANTO V2.3 "AURORA"  —  PREMIUM UI BUILD + MOVEMENT HARDENING
+    + ADVANCED COMBAT (team check, fov circle, hitbox, prediction)
+    + FREECAM / AUTOCLICK / PLAYER LIST / WORLD CONTROLS
+    + GATE PREMIUM ANIMATED BACKDROP
+    + fly: E/Q/Shift vertical removed (Space = up only)
 ]]
 
 -- ============================================================
@@ -36,7 +37,7 @@ local KEY_REMEMBER_SECONDS = 3600
 local GUI_NAME = "EkantoCyberPanel"
 local CONFIG_FILE = "EkantoConfig.json"
 local GAME_CONFIG_FILE = "EkantoConfig_" .. tostring(game.PlaceId) .. ".json"
-local CONFIG_VERSION = 5
+local CONFIG_VERSION = 6
 local INSTAGRAM_URL = "https://instagram.com"
 
 local Theme = {
@@ -138,7 +139,8 @@ local DEFAULT_WALKSPEED = 16
 local MICRO_MIN, MICRO_MAX = 5, 50
 local SLEEP_PERIOD = 14
 
-local AURA_RADIUS, AURA_PUSH, AURA_LIFT = 20, 300, 120
+local AURA_RADIUS_DEFAULT = 20
+local AURA_PUSH, AURA_LIFT = 300, 120
 local AURA_COOLDOWN, AURA_INTERVAL, AURA_SWING_INTERVAL = 0.25, 0.05, 0.12
 
 local TOOLTIP_MAX_W = 250
@@ -146,6 +148,8 @@ local TOAST_TEXT_W = 280
 
 local WAYPOINT_SLOTS = 8
 local SPARK_SAMPLES = 60
+
+local FREECAM_MIN, FREECAM_MAX = 10, 400
 
 local SOUND_IDS = {
     hover = { id = "rbxasset://sounds/clickfast.wav", vol = 0.10, pitch = 1.9 },
@@ -158,21 +162,31 @@ local SOUND_IDS = {
 -- 3. CONFIG & RUNTIME STATE
 -- ============================================================
 local TOGGLE_KEYS = { "fly", "godMode", "invisible", "esp", "aura", "optimizer", "noFog", "fullBright",
-    "noclip", "antiAfk", "espInfo", "espUsername", "aimLock", "aimHead", "aimNpc", "aimFire",
-    "netSleep", "speedLegacy", "smartHop", "auraPlayers", "fallRescue" }
+    "noclip", "antiAfk", "espInfo", "espUsername", "espBox", "aimLock", "aimHead", "aimNpc", "aimFire",
+    "aimPredict", "netSleep", "speedLegacy", "smartHop", "auraPlayers", "fallRescue",
+    "teamCheck", "fovCircle", "hitbox", "autoClick", "freecam", "autoJump", "antiFling" }
 local PASSIVE_RESTORE = { godMode = true, invisible = true, esp = true,
     optimizer = true, noFog = true, fullBright = true, antiAfk = true, espInfo = true,
-    espUsername = true, aimLock = true, aimHead = true, aimNpc = true, aimFire = true,
-    netSleep = true, smartHop = true, auraPlayers = true, fallRescue = true }
+    espUsername = true, espBox = true, aimLock = true, aimHead = true, aimNpc = true, aimFire = true,
+    netSleep = true, smartHop = true, auraPlayers = true, fallRescue = true,
+    teamCheck = true, fovCircle = true, antiFling = true }
 
 local DEFAULT_CONFIG = {
     speed = SPEED_MIN, flySpeed = 50,
     fly = false, godMode = false, invisible = false, esp = false,
     aura = false, optimizer = false, noFog = false, fullBright = false,
     noclip = false, antiAfk = false, espInfo = true,
-    espUsername = false,
+    espUsername = false, espBox = false, espDistance = 0,
     aimLock = false, aimFov = 25, aimSmooth = 8, aimHead = true, aimNpc = false, aimFire = false,
-    aimRange = 150,
+    aimRange = 150, aimPredict = false,
+    teamCheck = false, fovCircle = true,
+    hitbox = false, hitboxScale = 2,
+    autoClick = false, autoClickCps = 10,
+    freecam = false, freecamSpeed = 60,
+    autoJump = false, jumpPower = 0,
+    antiFling = true,
+    timeOfDay = 0, camFov = 0, gravity = 0,
+    auraRadius = AURA_RADIUS_DEFAULT,
     microStep = 20, netSleep = true, speedLegacy = false, smartHop = true,
     auraPlayers = false,
     flySpoof = 100,
@@ -185,11 +199,11 @@ local DEFAULT_CONFIG = {
     liteUI = false, perfGuard = false, guardFps = 30,
     panelW = PANEL_SIZE.X.Offset, panelH = PANEL_SIZE.Y.Offset,
     keys = { toggleUI = "RightControl", minimize = "M", fly = "F", noclip = "N", search = "Backquote",
-        aimLock = "LeftAlt" },
+        aimLock = "LeftAlt", freecam = "V" },
     profiles = {},
 }
 local DEFAULT_KEYS = { toggleUI = "RightControl", minimize = "M", fly = "F", noclip = "N", search = "Backquote",
-    aimLock = "LeftAlt" }
+    aimLock = "LeftAlt", freecam = "V" }
 local PROFILE_TOGGLES = { "godMode", "invisible", "esp", "optimizer", "noFog", "fullBright" }
 
 local function deepCopy(t)
@@ -632,6 +646,17 @@ local function makeDraggable(handle, target, onClick, bag, inertia)
     end))
 end
 
+-- ---------- team check helper ----------
+local function isFriendly(char)
+    if not Cfg.teamCheck then return false end
+    if not char then return false end
+    local plr = Players:GetPlayerFromCharacter(char)
+    if not plr then return false end
+    local me, them = LocalPlayer.Team, plr.Team
+    if not me or not them then return false end
+    return me == them
+end
+
 -- ============================================================
 -- 5. CONFIG IO
 -- ============================================================
@@ -748,6 +773,28 @@ local function migrateConfig(data)
         end
         v = 5
     end
+    if v < 6 then
+        data.teamCheck = data.teamCheck == true
+        data.fovCircle = data.fovCircle ~= false
+        data.hitbox = data.hitbox == true
+        data.hitboxScale = 2
+        data.autoClick = false
+        data.autoClickCps = 10
+        data.aimPredict = false
+        data.freecam = false
+        data.freecamSpeed = 60
+        data.autoJump = false
+        data.jumpPower = 0
+        data.antiFling = true
+        data.espBox = false
+        data.espDistance = 0
+        data.timeOfDay = 0
+        data.camFov = 0
+        data.gravity = 0
+        data.auraRadius = AURA_RADIUS_DEFAULT
+        if type(data.keys) == "table" then data.keys.freecam = data.keys.freecam or DEFAULT_KEYS.freecam end
+        v = 6
+    end
     data.version = v
     return data
 end
@@ -760,12 +807,23 @@ local function applyConfigData(data)
     if type(data.flySpeed) == "number" then
         Cfg.flySpeed = math.clamp(math.floor(data.flySpeed + 0.5), FLY_MIN, FLY_MAX)
     end
+    if type(data.freecamSpeed) == "number" then
+        Cfg.freecamSpeed = math.clamp(math.floor(data.freecamSpeed + 0.5), FREECAM_MIN, FREECAM_MAX)
+    end
     if type(data.speedBrake) == "number" then
         Cfg.speedBrake = math.clamp(math.floor(data.speedBrake + 0.5), 5, 60)
     end
     for _, k in ipairs(TOGGLE_KEYS) do
         if type(data[k]) == "boolean" then Cfg[k] = data[k] end
     end
+    if type(data.auraRadius) == "number" then Cfg.auraRadius = math.clamp(math.floor(data.auraRadius + 0.5), 5, 60) end
+    if type(data.hitboxScale) == "number" then Cfg.hitboxScale = math.clamp(data.hitboxScale, 1, 6) end
+    if type(data.autoClickCps) == "number" then Cfg.autoClickCps = math.clamp(math.floor(data.autoClickCps + 0.5), 1, 60) end
+    if type(data.espDistance) == "number" then Cfg.espDistance = math.clamp(math.floor(data.espDistance + 0.5), 0, 2000) end
+    if type(data.jumpPower) == "number" then Cfg.jumpPower = math.clamp(math.floor(data.jumpPower + 0.5), 0, 500) end
+    if type(data.timeOfDay) == "number" then Cfg.timeOfDay = math.clamp(data.timeOfDay, 0, 24) end
+    if type(data.camFov) == "number" then Cfg.camFov = math.clamp(math.floor(data.camFov + 0.5), 0, 130) end
+    if type(data.gravity) == "number" then Cfg.gravity = math.clamp(math.floor(data.gravity + 0.5), 0, 400) end
     if type(data.theme) == "string" then
         for _, pr in ipairs(THEME_PRESETS) do
             if pr.name == data.theme then Cfg.theme = pr.name end
@@ -1185,8 +1243,8 @@ function Fly.step(hrp, hum, dt)
         if UserInputService:IsKeyDown(Enum.KeyCode.S) then dir -= look end
         if UserInputService:IsKeyDown(Enum.KeyCode.D) then dir += right end
         if UserInputService:IsKeyDown(Enum.KeyCode.A) then dir -= right end
-        if UserInputService:IsKeyDown(Enum.KeyCode.Space) or UserInputService:IsKeyDown(Enum.KeyCode.E) then dir += up end
-        if UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) or UserInputService:IsKeyDown(Enum.KeyCode.Q) then dir -= up end
+        -- vertical: ONLY Space (E/Q/Shift removed)
+        if UserInputService:IsKeyDown(Enum.KeyCode.Space) then dir += up end
         if dir.Magnitude > 0.01 then target = dir.Unit * Cfg.flySpeed end
     end
 
@@ -1242,6 +1300,80 @@ function Fly.disable()
             end)
         end
     end
+end
+
+-- ---------- 6d2. Freecam ----------
+local Freecam = { active = false, yaw = 0, pitch = 0, pos = Vector3.zero, savedType = nil, savedWalk = nil }
+local FREECAM_BIND = "EkantoFreecam"
+
+function Freecam.enable()
+    local cam = workspace.CurrentCamera
+    if not cam or Freecam.active then return end
+    Freecam.active = true
+    Freecam.pos = cam.CFrame.Position
+    local rx, ry = cam.CFrame:ToEulerAnglesYXZ()
+    Freecam.pitch, Freecam.yaw = rx, ry
+    Freecam.savedType = cam.CameraType
+    cam.CameraType = Enum.CameraType.Scriptable
+    local _, hum = getCharacterParts()
+    if hum then
+        Freecam.savedWalk = hum.WalkSpeed
+        hum.WalkSpeed = 0
+    end
+    pcall(function() RunService:UnbindFromRenderStep(FREECAM_BIND) end)
+    RunService:BindToRenderStep(FREECAM_BIND, Enum.RenderPriority.Camera.Value - 1, function(dt)
+        pcall(Freecam.step, dt)
+    end)
+end
+
+function Freecam.step(dt)
+    if not Freecam.active then return end
+    local cam = workspace.CurrentCamera
+    if not cam then return end
+    pcall(function() UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter end)
+
+    local delta = UserInputService:GetMouseDelta()
+    local sens = 0.0026
+    Freecam.yaw -= delta.X * sens
+    Freecam.pitch = math.clamp(Freecam.pitch - delta.Y * sens, math.rad(-89), math.rad(89))
+    local rot = CFrame.fromEulerAnglesYXZ(Freecam.pitch, Freecam.yaw, 0)
+
+    local move = Vector3.zero
+    if not UserInputService:GetFocusedTextBox() then
+        local fwd, right, up = rot.LookVector, rot.RightVector, Vector3.new(0, 1, 0)
+        if UserInputService:IsKeyDown(Enum.KeyCode.W) then move += fwd end
+        if UserInputService:IsKeyDown(Enum.KeyCode.S) then move -= fwd end
+        if UserInputService:IsKeyDown(Enum.KeyCode.D) then move += right end
+        if UserInputService:IsKeyDown(Enum.KeyCode.A) then move -= right end
+        if UserInputService:IsKeyDown(Enum.KeyCode.Space) then move += up end
+        if UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) or UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then move -= up end
+    end
+    if move.Magnitude > 0.01 then move = move.Unit * (Cfg.freecamSpeed or 60) * dt end
+    Freecam.pos += move
+    cam.CFrame = CFrame.new(Freecam.pos) * rot
+
+    local _, hum = getCharacterParts()
+    if hum then hum.WalkSpeed = 0 end
+end
+
+function Freecam.goto()
+    local _, _, hrp = getCharacterParts()
+    if hrp then
+        hrp.CFrame = CFrame.new(Freecam.pos + Vector3.new(0, 2.5, 0))
+        hrp.AssemblyLinearVelocity = Vector3.zero
+    end
+end
+
+function Freecam.disable()
+    if not Freecam.active then return end
+    Freecam.active = false
+    pcall(function() RunService:UnbindFromRenderStep(FREECAM_BIND) end)
+    local cam = workspace.CurrentCamera
+    if cam and Freecam.savedType then cam.CameraType = Freecam.savedType end
+    local _, hum = getCharacterParts()
+    if hum and Freecam.savedWalk then hum.WalkSpeed = Freecam.savedWalk end
+    Freecam.savedWalk, Freecam.savedType = nil, nil
+    pcall(function() UserInputService.MouseBehavior = Enum.MouseBehavior.Default end)
 end
 
 -- ============================================================
@@ -1395,8 +1527,59 @@ function Speed.exit()
     AntiTrip.release()
 end
 
+-- ---------- 6e2. Anti-Fling / Anti-Void ----------
+local function antiFlingStep()
+    if not Cfg.antiFling then return end
+    local _, _, hrp = getCharacterParts()
+    if not hrp then return end
+    local v = hrp.AssemblyLinearVelocity
+    if v.Magnitude > 900 then
+        hrp.AssemblyLinearVelocity = v.Unit * 180
+    end
+    if hrp.Position.Y < -500 then
+        hrp.CFrame = CFrame.new(hrp.Position.X, 150, hrp.Position.Z)
+        hrp.AssemblyLinearVelocity = Vector3.zero
+    end
+end
+
+-- ---------- 6e3. Jump / Auto-jump ----------
+local function jumpStep()
+    local _, hum, hrp = getCharacterParts()
+    if not hum or not hrp then return end
+    if Cfg.jumpPower and Cfg.jumpPower > 0 then
+        pcall(function()
+            hum.UseJumpPower = true
+            if hum.JumpPower ~= Cfg.jumpPower then hum.JumpPower = Cfg.jumpPower end
+        end)
+    end
+    if Cfg.autoJump then
+        if hum.FloorMaterial ~= Enum.Material.Air and hum.MoveDirection.Magnitude > 0.1 then
+            hum.Jump = true
+        end
+    end
+end
+
+-- ---------- 6e4. Auto Clicker ----------
+local AutoClick = { acc = 0 }
+
+local function autoClickStep(dt)
+    if not Cfg.autoClick then return end
+    local cps = math.clamp(Cfg.autoClickCps or 10, 1, 60)
+    local interval = 1 / cps
+    AutoClick.acc += dt
+    if AutoClick.acc < interval then return end
+    AutoClick.acc = AutoClick.acc % interval
+    local char = LocalPlayer.Character
+    local tool = char and char:FindFirstChildOfClass("Tool")
+    if tool then pcall(function() tool:Activate() end) end
+end
+
 -- ---------- 6f. Melee Aura ----------
 local Aura = { token = 0, cooldowns = setmetatable({}, { __mode = "k" }), lastSwing = 0 }
+
+local auraParams = OverlapParams.new()
+auraParams.FilterType = Enum.RaycastFilterType.Exclude
+auraParams.MaxParts = 300
 
 local function findHumanoidModel(part)
     local node = part
@@ -1418,13 +1601,10 @@ function Aura.scan()
     local char, hum, hrp = getCharacterParts()
     if not (char and hum and hrp) or hum.Health <= 0 then return end
 
-    local params = OverlapParams.new()
-    params.FilterType = Enum.RaycastFilterType.Exclude
-    params.FilterDescendantsInstances = { char }
-    params.MaxParts = 300
+    auraParams.FilterDescendantsInstances = { char }
 
     local ok, parts = pcall(function()
-        return workspace:GetPartBoundsInRadius(hrp.Position, AURA_RADIUS, params)
+        return workspace:GetPartBoundsInRadius(hrp.Position, Cfg.auraRadius or AURA_RADIUS_DEFAULT, auraParams)
     end)
     if not ok or not parts then return end
 
@@ -1436,7 +1616,8 @@ function Aura.scan()
         if model and model ~= char and not handled[model] then
             handled[model] = true
             local isPlayer = Players:GetPlayerFromCharacter(model) ~= nil
-            if (not isPlayer) or Cfg.auraPlayers then
+            local friendly = isFriendly(model)
+            if ((not isPlayer) or Cfg.auraPlayers) and not friendly then
                 local targetHum = model:FindFirstChildOfClass("Humanoid")
                 local root = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
                 if targetHum and targetHum.Health > 0 and root and not root.Anchored then
@@ -1480,6 +1661,55 @@ function Aura.start()
     Aura.handle = Loop.register("Damage Aura", Aura.scan, { interval = AURA_INTERVAL, feature = "aura" })
 end
 
+-- ---------- 6f2. Hitbox Expander ----------
+local Hitbox = { orig = setmetatable({}, { __mode = "k" }), handle = nil }
+local HITBOX_PARTS = { "HumanoidRootPart", "Head", "UpperTorso", "LowerTorso", "Torso" }
+
+function Hitbox.applyToChar(char)
+    if not char then return end
+    local scale = Cfg.hitboxScale or 2
+    for _, name in ipairs(HITBOX_PARTS) do
+        local p = char:FindFirstChild(name)
+        if p and p:IsA("BasePart") then
+            if Hitbox.orig[p] == nil then Hitbox.orig[p] = p.Size end
+            local o = Hitbox.orig[p]
+            local want = Vector3.new(o.X * scale, o.Y * scale, o.Z * scale)
+            if p.Size ~= want then p.Size = want end
+        end
+    end
+end
+
+function Hitbox.restoreChar(char)
+    if not char then return end
+    for _, name in ipairs(HITBOX_PARTS) do
+        local p = char:FindFirstChild(name)
+        if p and Hitbox.orig[p] then
+            pcall(function() p.Size = Hitbox.orig[p] end)
+            Hitbox.orig[p] = nil
+        end
+    end
+end
+
+function Hitbox.step()
+    if not Cfg.hitbox then return end
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer then Hitbox.applyToChar(plr.Character) end
+    end
+end
+
+function Hitbox.start()
+    if Hitbox.handle then Loop.remove(Hitbox.handle) end
+    Hitbox.handle = Loop.register("Hitbox Expander", Hitbox.step, { interval = 0.4, feature = "hitbox" })
+    Hitbox.step()
+end
+
+function Hitbox.stop()
+    if Hitbox.handle then Loop.remove(Hitbox.handle); Hitbox.handle = nil end
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer then Hitbox.restoreChar(plr.Character) end
+    end
+end
+
 -- ---------- 6g. ESP ----------
 local ESP = { folder = nil, arrowLayer = nil, highlights = {}, tags = {}, charConns = {},
     playerAdded = nil, playerRemoving = nil, handle = nil }
@@ -1488,6 +1718,13 @@ local HP_LOW, HP_HIGH = Color3.fromRGB(255, 84, 108), Color3.fromRGB(80, 230, 15
 function ESP.nameOf(player)
     if Cfg.espUsername then return player.Name end
     return player.DisplayName
+end
+
+function ESP.colorFor(player)
+    if Cfg.teamCheck and LocalPlayer.Team and player.Team and LocalPlayer.Team == player.Team then
+        return Theme.Green
+    end
+    return Theme.Red
 end
 
 function ESP.removeTag(player)
@@ -1537,7 +1774,12 @@ function ESP.buildTag(player, char)
     fill:SetAttribute("NoTheme", true)
     local arrow = buildArrow(ESP.arrowLayer, HP_LOW, 22)
     arrow.Visible = false
-    ESP.tags[player] = { gui = gui, distL = distL, fill = fill, arrow = arrow, char = char,
+    local box = create("Frame", {
+        Name = "Box", BackgroundTransparency = 1, Visible = false, ZIndex = 44,
+        BorderSizePixel = 0,
+    }, ESP.folder)
+    local boxStroke = addStroke(box, ESP.colorFor(player), 1.5, 0.15)
+    ESP.tags[player] = { gui = gui, distL = distL, fill = fill, arrow = arrow, char = char, box = box,
         hum = char:FindFirstChildOfClass("Humanoid"), nameLbl = nameLbl, player = player }
 end
 
@@ -1547,6 +1789,7 @@ function ESP.update()
     local _, _, myHrp = getCharacterParts()
     local vp = cam.ViewportSize
     local center = vp / 2
+    local distLimit = Cfg.espDistance or 0
     for player, t in pairs(ESP.tags) do
         local char = t.char
         local wanted = ESP.nameOf(player)
@@ -1554,16 +1797,44 @@ function ESP.update()
         local root = char and char.Parent and char:FindFirstChild("HumanoidRootPart")
         if not root then
             t.arrow.Visible = false
+            if t.box then t.box.Visible = false end
         else
             local from = myHrp and myHrp.Position or cam.CFrame.Position
-            t.distL.Text = math.floor((root.Position - from).Magnitude) .. " studs"
+            local dist = (root.Position - from).Magnitude
+            t.distL.Text = math.floor(dist) .. " studs"
+            local visible = (distLimit <= 0) or (dist <= distLimit)
             local hum = t.hum
             local frac = (hum and hum.MaxHealth > 0) and math.clamp(hum.Health / hum.MaxHealth, 0, 1) or 0
             t.fill.Size = UDim2.new(frac, 0, 1, 0)
             t.fill.BackgroundColor3 = HP_LOW:Lerp(HP_HIGH, frac)
-            t.gui.Enabled = Cfg.espInfo ~= false
+            t.gui.Enabled = visible and Cfg.espInfo ~= false
+            if t.boxStroke then
+                local col = ESP.colorFor(player)
+                if t.boxStroke.Color ~= col then t.boxStroke.Color = col end
+            end
+
+            -- box esp
+            if Cfg.espBox and visible and t.box then
+                local head = char:FindFirstChild("Head")
+                local topPos = head and head.Position or (root.Position + Vector3.new(0, 2, 0))
+                local botPos = root.Position - Vector3.new(0, 3, 0)
+                local v1, on1 = cam:WorldToViewportPoint(topPos)
+                local v2, on2 = cam:WorldToViewportPoint(botPos)
+                if on1 and on2 then
+                    local bh = math.abs(v2.Y - v1.Y)
+                    local bw = bh * 0.62
+                    t.box.Size = UDim2.fromOffset(bw, bh)
+                    t.box.Position = UDim2.fromOffset(v1.X - bw / 2, math.min(v1.Y, v2.Y))
+                    t.box.Visible = true
+                else
+                    t.box.Visible = false
+                end
+            elseif t.box then
+                t.box.Visible = false
+            end
+
             local v, onScreen = cam:WorldToViewportPoint(root.Position)
-            if Cfg.espInfo == false or (onScreen and v.Z > 0) then
+            if not visible or Cfg.espInfo == false or (onScreen and v.Z > 0) then
                 t.arrow.Visible = false
             else
                 local rel = cam.CFrame:PointToObjectSpace(root.Position)
@@ -1591,7 +1862,7 @@ function ESP.attach(player)
             ESP.highlights[player] = create("Highlight", {
                 Name = "EkantoESP",
                 Adornee = char,
-                FillColor = Theme.Red,
+                FillColor = ESP.colorFor(player),
                 FillTransparency = 0.65,
                 OutlineColor = Theme.White,
                 OutlineTransparency = 0,
@@ -1715,10 +1986,22 @@ local function aimPart(char)
     return part or char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart
 end
 
+local function aimPos(part)
+    if Cfg.aimPredict then
+        local v = part.AssemblyLinearVelocity
+        if v.Magnitude > 1 then
+            local ping = 0
+            pcall(function() ping = LocalPlayer:GetNetworkPing() end)
+            return part.Position + v * (ping + 0.05)
+        end
+    end
+    return part.Position
+end
+
 local function aimAngle(cam, char)
     local part = aimPart(char)
     if not part then return nil end
-    local dir = part.Position - cam.CFrame.Position
+    local dir = aimPos(part) - cam.CFrame.Position
     if dir.Magnitude < 0.1 then return nil end
     return math.deg(math.acos(math.clamp(dir.Unit:Dot(cam.CFrame.LookVector), -1, 1))), part
 end
@@ -1740,6 +2023,7 @@ local function aimCandidates(cam, fov, range)
     local best, bestScore = nil, nil
     local function consider(char)
         if not char or char == myChar or not char.Parent then return end
+        if isFriendly(char) then return end
         local hum = char:FindFirstChildOfClass("Humanoid")
         if not hum or hum.Health <= 0 then return end
         local part = aimPart(char)
@@ -1884,7 +2168,7 @@ local function aimStep(dt)
         if Aim.target and Aim.target.Parent then
             local hum = Aim.target:FindFirstChildOfClass("Humanoid")
             local part = hum and aimPart(Aim.target)
-            if hum and hum.Health > 0 and part then
+            if hum and hum.Health > 0 and part and not isFriendly(Aim.target) then
                 local dist = (part.Position - cam.CFrame.Position).Magnitude
                 local ang = aimAngle(cam, Aim.target)
                 if dist <= range * 1.15 and ang and ang <= fov * 1.4 then keep = true end
@@ -1899,7 +2183,7 @@ local function aimStep(dt)
     if not part then Aim.target = nil; aimHighlight(nil); return end
     aimHighlight(target, pinned)
 
-    local desired = CFrame.lookAt(cam.CFrame.Position, part.Position)
+    local desired = CFrame.lookAt(cam.CFrame.Position, aimPos(part))
     local smooth = Cfg.aimSmooth or 0
     if smooth <= 0 then
         cam.CFrame = desired
@@ -1940,6 +2224,36 @@ function Aim.stop()
     Aim.target = nil
     Aim.clearPin(true)
     aimHighlight(nil)
+end
+
+-- ---------- 6g5. FOV circle ----------
+local FovCircle = { frame = nil }
+
+function FovCircle.ensure()
+    if FovCircle.frame and FovCircle.frame.Parent then return end
+    local f = create("Frame", {
+        Name = "FovCircle", AnchorPoint = Vector2.new(0.5, 0.5),
+        Position = UDim2.fromScale(0.5, 0.5), Size = UDim2.fromOffset(200, 200),
+        BackgroundTransparency = 1, Active = false, Visible = false, ZIndex = 40,
+    }, ScreenGui)
+    addCorner(f, 999)
+    local st = addStroke(f, Theme.Accent2, 1.5, 0.25)
+    st:SetAttribute("NoTheme", true)
+    FovCircle.frame = f
+end
+
+function FovCircle.refresh()
+    local f = FovCircle.frame
+    if not f then return end
+    if not (Cfg.fovCircle and Cfg.aimLock) then f.Visible = false return end
+    local cam = workspace.CurrentCamera
+    if not cam then return end
+    local vp = cam.ViewportSize
+    local halfV = math.rad(math.max(cam.FieldOfView, 1) / 2)
+    local r = (vp.Y / 2) * math.tan(math.rad(Cfg.aimFov or 25)) / math.tan(halfV)
+    r = math.clamp(r, 10, vp.Y)
+    f.Size = UDim2.fromOffset(r * 2, r * 2)
+    f.Visible = true
 end
 
 -- ---------- 6h. Environment ----------
@@ -2056,7 +2370,7 @@ function Optimizer.disable()
     end)
 end
 
-local Env = { fog = nil, bright = nil, far = nil, viewHandle = nil }
+local Env = { fog = nil, bright = nil, far = nil, viewHandle = nil, time = nil, grav = nil, fov = nil }
 
 local function getAtmosphere() return Lighting:FindFirstChildOfClass("Atmosphere") end
 
@@ -2074,7 +2388,6 @@ local function assertBright()
         Lighting.Ambient = Color3.new(1, 1, 1)
         Lighting.OutdoorAmbient = Color3.new(1, 1, 1)
         Lighting.Brightness = 3
-        Lighting.ClockTime = 14
     end)
 end
 
@@ -2111,7 +2424,7 @@ function Env.setBright(on)
             if not Env.bright then
                 Env.bright = {
                     ambient = Lighting.Ambient, outdoor = Lighting.OutdoorAmbient,
-                    brightness = Lighting.Brightness, clock = Lighting.ClockTime,
+                    brightness = Lighting.Brightness,
                 }
             end
             assertBright()
@@ -2119,8 +2432,45 @@ function Env.setBright(on)
             Lighting.Ambient = Env.bright.ambient
             Lighting.OutdoorAmbient = Env.bright.outdoor
             Lighting.Brightness = Env.bright.brightness
-            Lighting.ClockTime = Env.bright.clock
             Env.bright = nil
+        end
+    end)
+end
+
+function Env.setTime(v)
+    pcall(function()
+        if v and v > 0 then
+            if Env.time == nil then Env.time = Lighting.ClockTime end
+            Lighting.ClockTime = v
+        elseif Env.time ~= nil then
+            Lighting.ClockTime = Env.time
+            Env.time = nil
+        end
+    end)
+end
+
+function Env.setGravity(v)
+    pcall(function()
+        if v and v > 0 then
+            if Env.grav == nil then Env.grav = workspace.Gravity end
+            workspace.Gravity = v
+        elseif Env.grav ~= nil then
+            workspace.Gravity = Env.grav
+            Env.grav = nil
+        end
+    end)
+end
+
+function Env.setFov(v)
+    pcall(function()
+        local cam = workspace.CurrentCamera
+        if not cam then return end
+        if v and v > 0 then
+            if Env.fov == nil then Env.fov = cam.FieldOfView end
+            cam.FieldOfView = v
+        elseif Env.fov ~= nil then
+            cam.FieldOfView = Env.fov
+            Env.fov = nil
         end
     end)
 end
@@ -2178,6 +2528,7 @@ function Env.startLoop()
         if (Cfg.viewDist or 0) > 0 and not Cfg.noFog then Env.assertView() end
         if Cfg.noFog then assertFog() end
         if Cfg.fullBright then assertBright() end
+        if (Cfg.timeOfDay or 0) > 0 then Lighting.ClockTime = Cfg.timeOfDay end
     end, { interval = 0.5, keep = true })
 end
 
@@ -2382,10 +2733,53 @@ function Features.espUsername(on)
     end
 end
 
+function Features.espBox(on)
+    Cfg.espBox = on
+    if not on then
+        for _, t in pairs(ESP.tags) do if t.box then t.box.Visible = false end end
+    end
+end
+
 function Features.aimLock(on)
     Cfg.aimLock = on
     if on then Aim.start() else Aim.stop() end
+    FovCircle.refresh()
 end
+
+function Features.aimPredict(on) Cfg.aimPredict = on end
+
+function Features.teamCheck(on)
+    Cfg.teamCheck = on
+    for player in pairs(ESP.highlights) do
+        local h = ESP.highlights[player]
+        if h then h.FillColor = ESP.colorFor(player) end
+    end
+end
+
+function Features.fovCircle(on)
+    Cfg.fovCircle = on
+    FovCircle.ensure()
+    FovCircle.refresh()
+end
+
+function Features.hitbox(on)
+    Cfg.hitbox = on
+    if on then Hitbox.start() else Hitbox.stop() end
+end
+
+function Features.autoClick(on)
+    Cfg.autoClick = on
+    AutoClick.acc = 0
+end
+
+function Features.freecam(on)
+    Cfg.freecam = on
+    if on then Freecam.enable() else Freecam.disable() end
+end
+
+function Features.antiFling(on) Cfg.antiFling = on end
+
+function Features.autoJump(on) Cfg.autoJump = on end
 
 for name, fn in pairs(Features) do
     Features[name] = function(on)
@@ -2415,8 +2809,13 @@ local function movementStep(dt)
         if not (char and hum and hrp) then return end
         local alive = hum.Health > 0
         local desired = "idle"
-        if Cfg.fly and alive then desired = "fly"
-        elseif Cfg.speed > SPEED_MIN and alive and hum.SeatPart == nil then desired = "boost" end
+        if Freecam.active then
+            desired = "idle"
+        elseif Cfg.fly and alive then
+            desired = "fly"
+        elseif Cfg.speed > SPEED_MIN and alive and hum.SeatPart == nil then
+            desired = "boost"
+        end
         if desired ~= Runtime.mode then
             local from = Runtime.mode
             Runtime.mode = desired
@@ -2449,6 +2848,9 @@ local function registerGameplayLoops()
         local _, hum = getCharacterParts()
         if hum then Invis.step(hum) end
     end, { feature = "invisible" })
+    Loop.register("Anti-Fling", antiFlingStep, { feature = "antiFling" })
+    Loop.register("Jump", jumpStep, { keep = true })
+    Loop.register("Auto Clicker", autoClickStep, { feature = "autoClick" })
 end
 
 local function onCharacterAdded(char)
@@ -2484,10 +2886,12 @@ local function fullCleanup()
     end
     descendantConn, healthConn = nil, nil
     pcall(Aura.stop)
+    pcall(Hitbox.stop)
     pcall(ESP.disable)
     pcall(Noclip.stop)
     pcall(AntiAFK.stop)
     pcall(Aim.stop)
+    pcall(Freecam.disable)
     ThemeFx.items = nil
     pcall(function() if Loop.conn then Loop.conn:Disconnect(); Loop.conn = nil end end)
     table.clear(Loop.handlers)
@@ -2498,6 +2902,9 @@ local function fullCleanup()
     pcall(Invis.restore)
     pcall(Env.setFog, false)
     pcall(Env.setBright, false)
+    pcall(Env.setTime, 0)
+    pcall(Env.setGravity, 0)
+    pcall(Env.setFov, 0)
     pcall(Perf.restoreAll)
     task.spawn(function() pcall(Optimizer.disable) end)
     for _, k in ipairs(TOGGLE_KEYS) do Cfg[k] = false end
@@ -3052,6 +3459,15 @@ local function applyConfigToUI()
     end
     slider("speed", Cfg.speed)
     slider("flySpeed", Cfg.flySpeed)
+    slider("freecamSpeed", Cfg.freecamSpeed)
+    slider("auraRadius", Cfg.auraRadius)
+    slider("hitboxScale", Cfg.hitboxScale)
+    slider("autoClickCps", Cfg.autoClickCps)
+    slider("espDistance", Cfg.espDistance)
+    slider("jumpPower", Cfg.jumpPower)
+    slider("timeOfDay", Cfg.timeOfDay)
+    slider("camFov", Cfg.camFov)
+    slider("gravity", Cfg.gravity)
     for _, key in ipairs({ "renderLevel", "fpsCap", "animCap", "viewDist", "microStep", "flySpoof",
         "aimFov", "aimSmooth", "aimRange", "speedBrake" }) do
         slider(key, Cfg[key])
@@ -3075,7 +3491,6 @@ local function buildMain()
 
     local shadowParts = addPanelShadow(Main)
 
-    -- ===== background + gradient live OUTSIDE the CanvasGroup =====
     local bgFill = create("Frame", {
         Name = "BgFill", Size = UDim2.fromScale(1, 1),
         BackgroundColor3 = Theme.Bg, BorderSizePixel = 0, ZIndex = 2,
@@ -3120,7 +3535,7 @@ local function buildMain()
     create("UIGradient", { Color = ColorSequence.new(Theme.Accent, Theme.Accent2), Rotation = 0 }, logoText)
     local verLabel = create("TextLabel", {
         Position = UDim2.fromOffset(16, 36), Size = UDim2.new(1, -32, 0, 14),
-        BackgroundTransparency = 1, Text = "v2.2  •  PRO", TextSize = 10,
+        BackgroundTransparency = 1, Text = "v2.3  •  PRO", TextSize = 10,
         TextColor3 = Theme.TextFaint, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5,
     }, logo)
     verLabel:SetAttribute("NoBoost", true)
@@ -3140,7 +3555,6 @@ local function buildMain()
     }, sidebar)
     create("UIListLayout", { Padding = UDim.new(0, 5), SortOrder = Enum.SortOrder.LayoutOrder }, navList)
 
-    -- ===== profile card (no session timer) =====
     local sbFooter = create("Frame", {
         AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 8, 1, -10),
         Size = UDim2.new(1, -16, 0, 54),
@@ -3393,35 +3807,35 @@ local function buildMain()
     createSlider(movePage, {
         key = "speed", name = "Speed Boost (Swept Micro-Teleport)",
         desc = "16 - 500 • WalkSpeed stays untouched",
-        tip = "The extra distance is delivered as a SWEPT micro-move: a raycast sweep clamps you at walls, slides you along them, steps up small ledges and hugs slopes, so you can no longer tunnel through boundaries or fall under the map. Your real WalkSpeed is never changed.",
+        tip = "The extra distance is delivered as a SWEPT micro-move: a raycast sweep clamps you at walls, slides you along them, steps up small ledges and hugs slopes.",
         min = SPEED_MIN, max = SPEED_MAX, value = Cfg.speed, accent = Theme.Accent,
         onChange = function(v) Cfg.speed = v; scheduleSave() end,
     })
     createSlider(movePage, {
         key = "speedBrake", name = "Stop Brake (Inertia Fix)",
         desc = "Higher = stops faster • 5 - 60",
-        tip = "How hard the leftover engine velocity is killed the instant you let go of the keys. At the default you come to a dead stop in about 0.15s instead of sliding on for ages.",
+        tip = "How hard the leftover engine velocity is killed the instant you let go of the keys.",
         min = 5, max = 60, value = Cfg.speedBrake, accent = Theme.Accent2,
         onChange = function(v) Cfg.speedBrake = v; scheduleSave() end,
     })
     createSlider(movePage, {
         key = "microStep", name = "Sweep Granularity (x0.01 studs)",
         desc = "20 = 0.20 studs per swept step • 5 - 50",
-        tip = "How finely the frame distance is chopped before each collision sweep. Smaller = tighter collision on thin geometry. It is automatically capped at 14 sweeps per frame so it stays cheap.",
+        tip = "How finely the frame distance is chopped before each collision sweep.",
         min = MICRO_MIN, max = MICRO_MAX, value = Cfg.microStep, accent = Theme.Accent2,
         onChange = function(v) Cfg.microStep = v; scheduleSave() end,
     })
     createToggle(movePage, {
         key = "fallRescue", name = "Fall Rescue",
         desc = "Warps you back up if you fall below the map",
-        tip = "Remembers the last solid ground you stood on. If you somehow end up 70 studs below it, you are placed back on top instead of dying. This is your safety net if a game has holes in its floor.",
+        tip = "Remembers the last solid ground you stood on. If you somehow end up 70 studs below it, you are placed back on top.",
         accent = Theme.Accent,
         callback = function(on) Cfg.fallRescue = on and true or false; scheduleSave() end,
     })
     createToggle(movePage, {
         key = "netSleep", name = "Network Sleep Emulation",
         desc = "Periodic velocity write gaps",
-        tip = "On most ticks your reported velocity is a small organic oscillation around your natural walk speed. Every 14th tick the write is skipped entirely, so the server sees a natural packet-gap pattern.",
+        tip = "On most ticks your reported velocity is a small organic oscillation. Every 14th tick the write is skipped entirely.",
         accent = Theme.Accent,
         callback = function(on) Cfg.netSleep = on and true or false; scheduleSave() end,
     })
@@ -3436,8 +3850,8 @@ local function buildMain()
     createSection(movePage, "Flight")
     createToggle(movePage, {
         key = "fly", name = "Fly Hack Mode",
-        desc = "F • WASD + Space/E up + Shift/Q down",
-        tip = "Flight is driven by real engine velocity with gravity cancelled every frame, so the hover is dead still and never sinks, and you collide properly with the world instead of clipping into it.",
+        desc = "F • WASD move • Space = up (look down + W to descend)",
+        tip = "Flight is driven by real engine velocity with gravity cancelled every frame, so the hover is dead still and you collide properly with the world.",
         accent = Theme.Accent, rebind = "fly",
         callback = featureCallback("Fly Hack Mode", Features.fly),
     })
@@ -3451,56 +3865,123 @@ local function buildMain()
     createSlider(movePage, {
         key = "flySpoof", name = "Fly Collision Blend",
         desc = "100 = full engine physics (collides, admin-like) • 0 - 100",
-        tip = "How much of the flight is delivered through real engine velocity. 100 = pure physics: you stop at walls and rest on the ground, and the hover never sinks.",
+        tip = "How much of the flight is delivered through real engine velocity. 100 = pure physics: you stop at walls and rest on the ground.",
         min = 0, max = 100, value = Cfg.flySpoof, accent = Theme.Accent,
         onChange = function(v) Cfg.flySpoof = v; scheduleSave() end,
+    })
+
+    createSection(movePage, "Freecam")
+    createToggle(movePage, {
+        key = "freecam", name = "Freecam (Detached Camera)",
+        desc = "V • WASD + Space up / Shift down • mouse look",
+        tip = "Frees the camera from your character. Move around with WASD and look with the mouse. Use Teleport To Camera to snap your body over.",
+        accent = Theme.Accent2, rebind = "freecam",
+        callback = featureCallback("Freecam", Features.freecam),
+    })
+    createSlider(movePage, {
+        key = "freecamSpeed", name = "Freecam Speed", desc = "Camera travel speed • 10 - 400",
+        tip = "How fast the free camera moves with WASD.",
+        min = FREECAM_MIN, max = FREECAM_MAX, value = Cfg.freecamSpeed, accent = Theme.Accent2,
+        onChange = function(v) Cfg.freecamSpeed = v; scheduleSave() end,
+    })
+    createButton(movePage, "Teleport To Camera", Theme.Accent,
+        "Snaps your character to the freecam position.", function() Freecam.goto() end)
+
+    createSection(movePage, "Jump")
+    createSlider(movePage, {
+        key = "jumpPower", name = "Jump Power", desc = "0 = game default • 50 - 500",
+        tip = "Sets your jump power. Turn off if a game uses JumpHeight instead.",
+        min = 0, max = 500, value = Cfg.jumpPower, accent = Theme.Accent,
+        onChange = function(v) Cfg.jumpPower = v; scheduleSave() end,
+    })
+    createToggle(movePage, {
+        key = "autoJump", name = "Auto Jump (Bhop)", desc = "Jumps automatically while moving",
+        tip = "Hops the instant you land while moving forward.",
+        accent = Theme.Accent2,
+        callback = function(on) Cfg.autoJump = on and true or false; scheduleSave() end,
     })
 
     createSection(movePage, "Misc")
     createToggle(movePage, {
         key = "noclip", name = "Noclip",
         desc = "N • walk through walls",
-        tip = "Loops CanCollide off on every character part while enabled. Turning it off restores exactly the parts it changed.",
+        tip = "Loops CanCollide off on every character part while enabled.",
         accent = Theme.Accent2, rebind = "noclip",
         callback = featureCallback("Noclip", Features.noclip),
     })
+    createToggle(movePage, {
+        key = "antiFling", name = "Anti-Fling / Anti-Void",
+        desc = "Kills absurd velocity, rescues you from the void",
+        tip = "If something launches you with insane velocity it is damped. If you drop below Y -500 you are warped back up.",
+        accent = Theme.Accent,
+        callback = function(on) Cfg.antiFling = on and true or false; scheduleSave() end,
+    })
 
     -- ---------- Combat ----------
+    createSection(combatPage, "Targeting")
+    createToggle(combatPage, {
+        key = "teamCheck", name = "Team Check",
+        desc = "Ignore teammates (aim / aura / ESP color)",
+        tip = "Uses your Team and the target's Team. Teammates are skipped by aim and aura and shown green in ESP.",
+        accent = Theme.Accent,
+        callback = function(on) Cfg.teamCheck = on and true or false; scheduleSave() end,
+    })
+
     createToggle(combatPage, {
         key = "esp", name = "Universal Player ESP",
         desc = "Highlights other players through walls",
-        tip = "Flat red highlight with white outline on every other player, always visible through walls. Local only.",
+        tip = "Flat highlight with white outline on every other player, always visible through walls.",
         accent = Theme.Accent,
         callback = featureCallback("Player ESP", Features.esp),
     })
     createToggle(combatPage, {
+        key = "espBox", name = "Box ESP",
+        desc = "Draws a box around every player",
+        tip = "Projected 2D box around each player. Colored by team when Team Check is on.",
+        accent = Theme.Accent2,
+        callback = featureCallback("Box ESP", Features.espBox),
+    })
+    createToggle(combatPage, {
         key = "espInfo", name = "ESP Info Tags + Arrows",
         desc = "Name • distance • health bar • edge arrows",
-        tip = "Needs Player ESP on. Shows a tag above each player from any range plus an arrow at the screen edge pointing to players who are off-screen.",
+        tip = "Needs Player ESP on. Shows a tag above each player plus an arrow at the screen edge.",
         accent = Theme.Accent2,
         callback = featureCallback("ESP Info", Features.espInfo),
     })
     createToggle(combatPage, {
         key = "espUsername", name = "ESP Show Username",
         desc = "Off = display name • On = @username",
-        tip = "Switches the name above every player between their display name and their real username. Needs Player ESP on.",
+        tip = "Switches the name above every player between display name and real username.",
         accent = Theme.Accent,
         callback = featureCallback("ESP Username", Features.espUsername),
+    })
+    createSlider(combatPage, {
+        key = "espDistance", name = "ESP Max Distance", desc = "0 = unlimited • 100 - 2000 studs",
+        tip = "Hide ESP for players farther than this.",
+        min = 0, max = 2000, value = Cfg.espDistance, accent = Theme.Accent,
+        onChange = function(v) Cfg.espDistance = v; scheduleSave() end,
     })
 
     createSection(combatPage, "Aim")
     createToggle(combatPage, {
         key = "aimLock", name = "Aim Lock (Auto-Aim)",
         desc = "Hotkey: " .. (Cfg.keys.aimLock or "LeftAlt") .. " • camera locks onto the crosshair target",
-        tip = "Picks the player closest to the centre of your screen inside the FOV cone AND inside Aim Range. Runs after the game's camera. Middle click pins a target.",
+        tip = "Picks the player closest to the centre of your screen inside the FOV cone AND Aim Range. Middle click pins a target.",
         accent = Theme.Accent2, rebind = "aimLock",
         callback = featureCallback("Aim Lock", Features.aimLock),
     })
+    createToggle(combatPage, {
+        key = "fovCircle", name = "Aim FOV Circle",
+        desc = "Draws the aim cone on screen",
+        tip = "A ring showing exactly where the aim can grab targets.",
+        accent = Theme.Accent,
+        callback = featureCallback("FOV Circle", Features.fovCircle),
+    })
     createSlider(combatPage, {
         key = "aimFov", name = "Aim FOV", desc = "How far from the crosshair it grabs • 5 - 90 degrees",
-        tip = "The aim only engages when a target is inside this cone. Lower = only locks when you are already pointing at them.",
+        tip = "The aim only engages when a target is inside this cone.",
         min = 5, max = 90, value = Cfg.aimFov, accent = Theme.Accent,
-        onChange = function(v) Cfg.aimFov = v; scheduleSave() end,
+        onChange = function(v) Cfg.aimFov = v; FovCircle.refresh(); scheduleSave() end,
     })
     createSlider(combatPage, {
         key = "aimRange", name = "Aim Range Control", desc = "Hard stud limit • 10 - 500",
@@ -3521,6 +4002,13 @@ local function buildMain()
         callback = function(on) Cfg.aimHead = on and true or false; scheduleSave() end,
     })
     createToggle(combatPage, {
+        key = "aimPredict", name = "Aim Prediction (Lead)",
+        desc = "Leads moving targets using their velocity",
+        tip = "Aims at where the target will be, compensating for ping and their movement.",
+        accent = Theme.Accent,
+        callback = featureCallback("Aim Prediction", Features.aimPredict),
+    })
+    createToggle(combatPage, {
         key = "aimNpc", name = "Aim at NPCs too", desc = "Include non-player humanoids",
         tip = "Also locks onto NPCs / dummies / mobs, not just real players.",
         accent = Theme.Accent,
@@ -3538,11 +4026,30 @@ local function buildMain()
 
     createSection(combatPage, "Melee")
     createToggle(combatPage, {
+        key = "hitbox", name = "Hitbox Expander",
+        desc = "Enlarges other players' hit parts",
+        tip = "Scales HumanoidRootPart / Head / torso of every other player so your weapon hits from farther.",
+        accent = Theme.Accent2,
+        callback = featureCallback("Hitbox Expander", Features.hitbox),
+    })
+    createSlider(combatPage, {
+        key = "hitboxScale", name = "Hitbox Size Multiplier", desc = "1 = normal • up to 6x",
+        tip = "How much bigger the target's hit parts become.",
+        min = 1, max = 6, value = Cfg.hitboxScale, accent = Theme.Accent,
+        onChange = function(v) Cfg.hitboxScale = v; scheduleSave() end,
+    })
+    createToggle(combatPage, {
         key = "aura", name = "Auto-Hit / M1 Damage Aura",
-        desc = "Force-fires your tool + flings NPCs within 20 studs",
-        tip = "Scans every 0.05s with a spatial query, finds every live Humanoid in range and force-activates your equipped Tool so its REAL hit registration and full damage land.",
+        desc = "Force-fires your tool + flings NPCs in range",
+        tip = "Scans every 0.05s and force-activates your equipped Tool so its real hit registration and damage land.",
         accent = Theme.Accent2,
         callback = featureCallback("Damage Aura", Features.aura),
+    })
+    createSlider(combatPage, {
+        key = "auraRadius", name = "Aura Radius", desc = "5 - 60 studs",
+        tip = "How far the damage aura reaches.",
+        min = 5, max = 60, value = Cfg.auraRadius, accent = Theme.Accent,
+        onChange = function(v) Cfg.auraRadius = v; scheduleSave() end,
     })
     createToggle(combatPage, {
         key = "auraPlayers", name = "Aura Hits Players Too",
@@ -3551,17 +4058,19 @@ local function buildMain()
         accent = Theme.Accent,
         callback = function(on) Cfg.auraPlayers = on and true or false; scheduleSave() end,
     })
+
+    createSection(combatPage, "Survivability")
     createToggle(combatPage, {
         key = "godMode", name = "100% God Mode",
         desc = "Health locked to max • CanTouch stays ON (pickups work)",
-        tip = "Immunity WITHOUT touching CanTouch, so TouchTransmitter signals survive and coins / tools / map drops keep being collected. Client-side only.",
+        tip = "Immunity WITHOUT touching CanTouch, so TouchTransmitter signals survive and pickups keep working.",
         accent = Theme.Accent,
         callback = featureCallback("God Mode", Features.godMode),
     })
     createToggle(combatPage, {
         key = "invisible", name = "Smart Invisibility",
         desc = "Sever tracking + full immunity, still hits back",
-        tip = "Hides your character, name tag and query box and force-locks health. Your tool's own touch/raycast hit registration is untouched, so you still deal FULL damage.",
+        tip = "Hides your character, name tag and query box and force-locks health. Your tool's own hit registration is untouched.",
         accent = Theme.Accent2,
         callback = featureCallback("Smart Invisibility", Features.invisible),
     })
@@ -3570,7 +4079,7 @@ local function buildMain()
     createToggle(perfPage, {
         key = "optimizer", name = "Graphics & Animation Optimizer",
         desc = "Less effects, flat materials, cheaper meshes",
-        tip = "Disables particles/trails/beams/post effects, flattens materials, hides decals, turns off light shadows, lowers mesh detail and terrain water/grass. It does NOT lower the render quality level.",
+        tip = "Disables particles/trails/beams/post effects, flattens materials, hides decals, turns off light shadows, lowers mesh detail and terrain water/grass.",
         accent = Theme.Accent2,
         callback = featureCallback("FPS Optimizer", Features.optimizer),
     })
@@ -3617,15 +4126,35 @@ local function buildMain()
         local streaming = workspace.StreamingEnabled
         if streaming then
             createInfo(perfPage, "This game uses world streaming (target radius about "
-                .. math.floor(workspace.StreamingTargetRadius) .. " studs). The server decides what gets loaded, so parts beyond that never reach your screen.", Theme.Off)
+                .. math.floor(workspace.StreamingTargetRadius) .. " studs).", Theme.Off)
         else
             createInfo(perfPage, "This game does not stream the world, so View Distance and Remove Fog fully control how far you can see.", Theme.Off)
         end
     end)
 
+    createSection(perfPage, "World")
+    createSlider(perfPage, {
+        key = "timeOfDay", name = "Time Of Day", desc = "0 = game default • 1 - 24 hours",
+        tip = "Sets the lighting clock. Great for making night maps bright.",
+        min = 0, max = 24, value = Cfg.timeOfDay, accent = Theme.Accent,
+        onChange = function(v) Cfg.timeOfDay = v; Env.setTime(v); scheduleSave() end,
+    })
+    createSlider(perfPage, {
+        key = "camFov", name = "Camera FOV", desc = "0 = game default • 70 - 130",
+        tip = "Wider field of view sees more around you.",
+        min = 0, max = 130, value = Cfg.camFov, accent = Theme.Accent2,
+        onChange = function(v) Cfg.camFov = v; Env.setFov(v); scheduleSave() end,
+    })
+    createSlider(perfPage, {
+        key = "gravity", name = "Gravity", desc = "0 = game default • 1 - 400",
+        tip = "Lower gravity for floaty movement, higher to slam down.",
+        min = 0, max = 400, value = Cfg.gravity, accent = Theme.Accent,
+        onChange = function(v) Cfg.gravity = v; Env.setGravity(v); scheduleSave() end,
+    })
+
     createToggle(perfPage, {
         key = "liteUI", name = "Lite Panel Mode", desc = "Stops the panel's animated borders",
-        tip = "The neon borders re-draw every frame. Lite mode freezes them, so the panel itself costs almost nothing.",
+        tip = "The neon borders re-draw every frame. Lite mode freezes them.",
         accent = Theme.Accent,
         callback = function(on)
             Cfg.liteUI = on and true or false
@@ -3860,7 +4389,10 @@ local function buildMain()
         aura = "Aura", optimizer = "Opt", noFog = "NoFog", fullBright = "Bright",
         noclip = "Clip", antiAfk = "AFK", espUsername = "User", aimLock = "Aim",
         aimHead = "Head", aimNpc = "NPC", aimFire = "Fire", netSleep = "Sleep",
-        speedLegacy = "Legacy", smartHop = "Smart", auraPlayers = "AuraP", fallRescue = "Rescue" }
+        speedLegacy = "Legacy", smartHop = "Smart", auraPlayers = "AuraP", fallRescue = "Rescue",
+        teamCheck = "Team", fovCircle = "FOV", hitbox = "Hitbox", autoClick = "Click",
+        aimPredict = "Lead", freecam = "Cam", autoJump = "Jump", antiFling = "Fling",
+        espBox = "Box" }
 
     local function getPing()
         local ok, v = pcall(function()
@@ -3990,7 +4522,20 @@ local function buildMain()
         end,
     })
 
-    createSection(toolsPage, "Utility")
+    createSection(toolsPage, "Automation")
+    createToggle(toolsPage, {
+        key = "autoClick", name = "Auto Clicker",
+        desc = "Auto-activates your equipped tool",
+        tip = "Fires your tool at the set CPS while enabled. Great for farming clicks and m1 games.",
+        accent = Theme.Accent2,
+        callback = featureCallback("Auto Clicker", Features.autoClick),
+    })
+    createSlider(toolsPage, {
+        key = "autoClickCps", name = "Auto Clicker CPS", desc = "Clicks per second • 1 - 60",
+        tip = "How many tool activations per second.",
+        min = 1, max = 60, value = Cfg.autoClickCps, accent = Theme.Accent2,
+        onChange = function(v) Cfg.autoClickCps = v; scheduleSave() end,
+    })
     createToggle(toolsPage, {
         key = "antiAfk", name = "Anti-AFK",
         desc = "Dodges the 20-minute idle kick",
@@ -3998,6 +4543,109 @@ local function buildMain()
         accent = Theme.Accent2,
         callback = featureCallback("Anti-AFK", Features.antiAfk),
     })
+
+    createSection(toolsPage, "Players")
+    local PlayerList = { card = nil, list = nil, spectating = nil, refreshAt = 0 }
+
+    local plCard = createCard(toolsPage, "PlayerList", 240, Theme.Accent)
+    plCard:SetAttribute("search", "player list goto teleport spectate follow names")
+    cardLabels(plCard, "Player List", "Go = teleport to player • Spec = follow with camera")
+    PlayerList.card = plCard
+    local plList = create("ScrollingFrame", {
+        Position = UDim2.new(0, 12, 0, 58), Size = UDim2.new(1, -24, 1, -70),
+        BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 3,
+        ScrollBarImageColor3 = Theme.Hairline, CanvasSize = UDim2.new(), ZIndex = 4,
+    }, plCard)
+    local plLayout = create("UIListLayout", { Padding = UDim.new(0, 5), SortOrder = Enum.SortOrder.LayoutOrder }, plList)
+    track(plLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+        plList.CanvasSize = UDim2.new(0, 0, 0, plLayout.AbsoluteContentSize.Y + 4)
+    end))
+    PlayerList.list = plList
+
+    local function spectate(plr)
+        local cam = workspace.CurrentCamera
+        if not cam then return end
+        if PlayerList.spectating == plr then
+            PlayerList.spectating = nil
+            local _, hum = getCharacterParts()
+            if hum then cam.CameraSubject = hum end
+            Toast.show("Spectate off", Theme.Off, 1.5)
+            return
+        end
+        local char = plr.Character
+        local hum = char and char:FindFirstChildOfClass("Humanoid")
+        if not hum then Toast.show("Player has no character", Theme.Red, 1.8) return end
+        PlayerList.spectating = plr
+        cam.CameraSubject = hum
+        Toast.show("Spectating " .. plr.DisplayName, Theme.Accent2, 1.8)
+    end
+
+    local function gotoPlayer(plr)
+        local _, _, myHrp = getCharacterParts()
+        local char = plr.Character
+        local hrp = char and char:FindFirstChild("HumanoidRootPart")
+        if not (myHrp and hrp) then Toast.show("Can't teleport right now", Theme.Red, 1.8) return end
+        myHrp.CFrame = CFrame.new(hrp.Position + Vector3.new(0, 3, 0))
+        myHrp.AssemblyLinearVelocity = Vector3.zero
+        Speed.lastSafe = myHrp.Position
+    end
+
+    local function refreshPlayerList()
+        if not plList.Parent then return end
+        for _, c in ipairs(plList:GetChildren()) do
+            if c:IsA("TextButton") then c:Destroy() end
+        end
+        local _, _, myHrp = getCharacterParts()
+        local others = {}
+        for _, plr in ipairs(Players:GetPlayers()) do
+            if plr ~= LocalPlayer then table.insert(others, plr) end
+        end
+        table.sort(others, function(a, b) return a.Name < b.Name end)
+        if #others == 0 then
+            create("TextLabel", {
+                Size = UDim2.new(1, -6, 0, 24), BackgroundTransparency = 1,
+                Text = "No other players.", TextSize = 12, TextColor3 = Theme.TextDim,
+                TextXAlignment = Enum.TextXAlignment.Left,
+            }, plList)
+            return
+        end
+        for i, plr in ipairs(others) do
+            local char = plr.Character
+            local hum = char and char:FindFirstChildOfClass("Humanoid")
+            local hrp = char and char:FindFirstChild("HumanoidRootPart")
+            local dist = (myHrp and hrp) and math.floor((hrp.Position - myHrp.Position).Magnitude) or 0
+            local row = create("TextButton", {
+                LayoutOrder = i, Size = UDim2.new(1, -6, 0, 30), BackgroundColor3 = Theme.Bg,
+                Text = "", AutoButtonColor = false, ZIndex = 5,
+            }, plList)
+            addCorner(row, 7)
+            local friendly = Cfg.teamCheck and LocalPlayer.Team and plr.Team and LocalPlayer.Team == plr.Team
+            create("TextLabel", {
+                Position = UDim2.fromOffset(9, 0), Size = UDim2.new(1, -150, 1, 0),
+                BackgroundTransparency = 1, Text = plr.DisplayName .. "  (" .. dist .. "m)",
+                TextSize = 12, TextColor3 = friendly and Theme.Green or Theme.Text,
+                TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 6,
+            }, row)
+            local function rowBtn(text, xOff, color, fn)
+                local b = create("TextButton", {
+                    AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, xOff, 0.5, 0),
+                    Size = UDim2.fromOffset(52, 22), BackgroundColor3 = Theme.Surface,
+                    Text = text, TextSize = 11, AutoButtonColor = false, ZIndex = 6,
+                }, row)
+                addCorner(b, 6)
+                addStroke(b, color, 1, 0.4)
+                track(b.MouseButton1Click:Connect(function() Sfx.play("click"); guard("PlayerList " .. text, nil, fn) end))
+            end
+            rowBtn("Spec", -9, Theme.Accent2, function() spectate(plr) end)
+            rowBtn("Go", -65, Theme.Accent, function() gotoPlayer(plr) end)
+        end
+    end
+    PlayerList.refresh = refreshPlayerList
+
+    Loop.register("Player List", function()
+        refreshPlayerList()
+    end, { interval = 1.2, keep = true })
+    refreshPlayerList()
 
     createSection(toolsPage, "Profiles")
     for i = 1, 3 do createProfileCard(toolsPage, i) end
@@ -4869,6 +5517,7 @@ local function buildMain()
         { id = "minimize", name = "Minimize Panel", desc = "Collapse to the floating E button" },
         { id = "fly", name = "Toggle Fly", desc = "Quick on / off for Fly Hack Mode" },
         { id = "noclip", name = "Toggle Noclip", desc = "Quick on / off for Noclip" },
+        { id = "freecam", name = "Toggle Freecam", desc = "Quick on / off for the free camera" },
         { id = "aimLock", name = "Toggle Aim Lock", desc = "Quick on / off for the auto-aim" },
         { id = "search", name = "Focus Command Bar", desc = "Jumps to the search / command box" },
     }) do
@@ -4894,12 +5543,21 @@ local function buildMain()
         for _, k in ipairs(TOGGLE_KEYS) do pcall(function() UI.toggles[k].Set(false, true) end) end
         pcall(function() UI.sliders.speed.Set(SPEED_MIN) end)
         pcall(function() UI.sliders.flySpeed.Set(DEFAULT_CONFIG.flySpeed) end)
+        pcall(function() UI.sliders.freecamSpeed.Set(60) end)
         pcall(function() UI.sliders.uiScale.Set(100) end)
         pcall(function() UI.sliders.hopMax.Set(8) end)
         pcall(function() UI.sliders.renderLevel.Set(0) end)
         pcall(function() UI.sliders.fpsCap.Set(0) end)
         pcall(function() UI.sliders.animCap.Set(0) end)
         pcall(function() UI.sliders.viewDist.Set(0) end)
+        pcall(function() UI.sliders.timeOfDay.Set(0) end)
+        pcall(function() UI.sliders.camFov.Set(0) end)
+        pcall(function() UI.sliders.gravity.Set(0) end)
+        pcall(function() UI.sliders.auraRadius.Set(AURA_RADIUS_DEFAULT) end)
+        pcall(function() UI.sliders.hitboxScale.Set(2) end)
+        pcall(function() UI.sliders.autoClickCps.Set(10) end)
+        pcall(function() UI.sliders.espDistance.Set(0) end)
+        pcall(function() UI.sliders.jumpPower.Set(0) end)
         pcall(function() UI.toggles.liteUI.Set(false, true) end)
         pcall(function() UI.toggles.perfGuard.Set(false, true) end)
         pcall(function() UI.sliders.guardFps.Set(30) end)
@@ -4909,6 +5567,15 @@ local function buildMain()
         pcall(function() UI.toggles.smartHop.Set(true, true) end)
         pcall(function() UI.toggles.auraPlayers.Set(false, true) end)
         pcall(function() UI.toggles.fallRescue.Set(true, true) end)
+        pcall(function() UI.toggles.antiFling.Set(true, true) end)
+        pcall(function() UI.toggles.fovCircle.Set(true, true) end)
+        pcall(function() UI.toggles.teamCheck.Set(false, true) end)
+        pcall(function() UI.toggles.aimPredict.Set(false, true) end)
+        pcall(function() UI.toggles.hitbox.Set(false, true) end)
+        pcall(function() UI.toggles.autoClick.Set(false, true) end)
+        pcall(function() UI.toggles.freecam.Set(false, true) end)
+        pcall(function() UI.toggles.autoJump.Set(false, true) end)
+        pcall(function() UI.toggles.espBox.Set(false, true) end)
         pcall(function() UI.sliders.aimFov.Set(25) end)
         pcall(function() UI.sliders.aimRange.Set(150) end)
         pcall(function() UI.sliders.aimSmooth.Set(8) end)
@@ -4964,6 +5631,56 @@ local function buildMain()
             Toast.show(ok and "Settings copied to clipboard" or "Clipboard unavailable here",
                 ok and Theme.Accent2 or Theme.Red)
         end)
+
+    local importCard, importStroke = createCard(settingsPage, "ImportConfig", 112, Theme.Accent2)
+    importCard:SetAttribute("search", "import config settings paste load json string restore")
+    importCard:SetAttribute("desc", "Import Settings - paste a copied config string then press Import")
+    create("TextLabel", {
+        Position = UDim2.new(0, 14, 0, 8), Size = UDim2.new(1, -28, 0, 20),
+        BackgroundTransparency = 1, Text = "Import Settings", TextSize = 15,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, importCard)
+    create("TextLabel", {
+        Position = UDim2.new(0, 14, 0, 28), Size = UDim2.new(1, -28, 0, 16),
+        BackgroundTransparency = 1, Text = "Paste a copied config (encrypted or JSON), then Import",
+        TextSize = 12, TextColor3 = Theme.TextDim, TextXAlignment = Enum.TextXAlignment.Left,
+    }, importCard)
+    local importBox = create("TextBox", {
+        Position = UDim2.new(0, 14, 0, 48), Size = UDim2.new(1, -96, 0, 30),
+        BackgroundColor3 = Theme.Bg, Text = "", ClearTextOnFocus = false,
+        PlaceholderText = "EK2:... or {json}", PlaceholderColor3 = Theme.TextFaint,
+        TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5,
+    }, importCard)
+    addCorner(importBox, 8)
+    addStroke(importBox, Theme.Hairline, 1, 0.5)
+    create("UIPadding", { PaddingLeft = UDim.new(0, 9), PaddingRight = UDim.new(0, 9) }, importBox)
+    local importBtn = create("TextButton", {
+        AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -12, 0, 48),
+        Size = UDim2.fromOffset(68, 30), BackgroundColor3 = Theme.Bg,
+        Text = "Import", TextSize = 13, AutoButtonColor = false, ZIndex = 5,
+    }, importCard)
+    addCorner(importBtn, 8)
+    addStroke(importBtn, Theme.Accent2, 1, 0.3)
+    track(importBtn.MouseButton1Click:Connect(function()
+        ripple(importCard, Theme.Accent2); Sfx.play("click")
+        local raw = string.gsub(importBox.Text, "^%s*(.-)%s*$", "%1")
+        if raw == "" then Toast.show("Paste a config string first", Theme.Red, 2) return end
+        local data = decodeConfig(raw)
+        if not data then Toast.show("Invalid config string", Theme.Red, 2.5) return end
+        applyConfigData(data)
+        applyConfigToUI()
+        pcall(setThemeColors, Cfg.theme)
+        applyTheme(Cfg.theme)
+        refreshSwatches()
+        Theme.Font = fontPreset(Cfg.font).font
+        applyTextStyle(true)
+        Cfg.freecam = false
+        pcall(function() UI.sliders.uiScale.Set(Cfg.uiScale) end)
+        scheduleSave()
+        Toast.show("Config imported", Theme.Accent2, 2.5)
+    end))
+    addHoverFX(importCard, importStroke)
+
     createInfo(settingsPage,
         "Tips: drag the header or the logo to move the panel, drag the bottom-right corner to resize it, and use the search box at the top to filter features across every page.",
         Theme.Off)
@@ -5085,6 +5802,8 @@ local function buildMain()
     UI.toggles.toasts.Set(Cfg.toasts ~= false, true)
     UI.toggles.perGame.Set(Cfg.perGame == true, true)
 
+    FovCircle.ensure()
+
     applyConfigToUI()
     selectTab("Movement")
 
@@ -5101,7 +5820,7 @@ local function buildMain()
         end
     end)
 
-    -- ---------- Minimize (smooth cross-fade) ----------
+    -- ---------- Minimize ----------
     local MINI_TWEEN = TweenInfo.new(0.34, Enum.EasingStyle.Quint, Enum.EasingDirection.Out)
     local minToken = 0
     local setMinimized
@@ -5262,6 +5981,8 @@ local function buildMain()
             pcall(function() UI.toggles.fly.Toggle() end)
         elseif code == Rebind.codeOf("noclip") then
             pcall(function() UI.toggles.noclip.Toggle() end)
+        elseif code == Rebind.codeOf("freecam") then
+            pcall(function() UI.toggles.freecam.Toggle() end)
         elseif code == Rebind.codeOf("aimLock") then
             pcall(function() UI.toggles.aimLock.Toggle() end)
         elseif code == Rebind.codeOf("search") then
@@ -5283,7 +6004,9 @@ local function buildMain()
         opt = "optimizer", optimizer = "optimizer", fps = "optimizer", hud = "hud", info = "espInfo",
         aim = "aimLock", aimlock = "aimLock", uname = "espUsername", username = "espUsername",
         sleep = "netSleep", netsleep = "netSleep", legacy = "speedLegacy", smart = "smartHop",
-        auraplayers = "auraPlayers", rescue = "fallRescue",
+        auraplayers = "auraPlayers", rescue = "fallRescue", team = "teamCheck", fov = "fovCircle",
+        hitbox = "hitbox", click = "autoClick", autoclick = "autoClick", cam = "freecam",
+        freecam = "freecam", jump = "autoJump", fling = "antiFling", box = "espBox", lead = "aimPredict",
     }
     local function runToggle(key, arg)
         local t = UI.toggles[key]
@@ -5322,6 +6045,8 @@ local function buildMain()
             return function() Aim.pinUnderMouse() end
         elseif cmd == "unpin" then
             return function() Aim.clearPin() end
+        elseif cmd == "gotocam" then
+            return function() Freecam.goto() end
         elseif (cmd == "speed" or cmd == "flyspeed") and tonumber(a1) then
             return function() UI.sliders[cmd == "speed" and "speed" or "flySpeed"].Set(tonumber(a1)) end
         elseif cmd == "aimfov" and tonumber(a1) then
@@ -5332,6 +6057,8 @@ local function buildMain()
             return function() UI.sliders.microStep.Set(tonumber(a1)) end
         elseif cmd == "brake" and tonumber(a1) then
             return function() UI.sliders.speedBrake.Set(tonumber(a1)) end
+        elseif cmd == "aura" and tonumber(a1) then
+            return function() UI.sliders.auraRadius.Set(tonumber(a1)) end
         elseif (cmd == "tp" or cmd == "wp") and tonumber(a1) then
             return function() Waypoints.go(math.floor(tonumber(a1))) end
         elseif cmd == "setwp" and tonumber(a1) then
@@ -5344,7 +6071,7 @@ local function buildMain()
             return function() setWindowVisible(false) end
         elseif cmd == "help" then
             return function()
-                Toast.show("Commands: fly god invis esp aura noclip afk fog bright fps hud aim uname sleep smart legacy rescue • theme <name> • hop [random] • rejoin • jobid • servers • pin • unpin • speed N • brake N • aimfov N • aimrange N • micro N • tp N • setwp N • profile N", Theme.Accent, 6)
+                Toast.show("Commands: fly god invis esp aura noclip afk fog bright fps hud aim team fov hitbox click cam jump fling box lead uname sleep smart legacy rescue • theme <name> • hop [random] • rejoin • jobid • servers • pin • unpin • gotocam • speed N • brake N • aura N • aimfov N • aimrange N • micro N • tp N • setwp N • profile N", Theme.Accent, 6)
             end
         end
         return nil
@@ -5439,14 +6166,123 @@ local function buildMain()
 
     Env.startLoop()
     staggerIn(tabs.Movement.page.frame)
-    Toast.show("EKANTO v2.2 loaded. " .. Cfg.keys.toggleUI .. " hides, " .. Cfg.keys.minimize
-        .. " minimizes, " .. Cfg.keys.fly .. " flies, " .. (Cfg.keys.aimLock or "LeftAlt") .. " aims.",
-        Theme.Accent2, 4)
+    Toast.show("EKANTO v2.3 loaded. " .. Cfg.keys.toggleUI .. " hides, " .. Cfg.keys.minimize
+        .. " minimizes, " .. Cfg.keys.fly .. " flies, " .. Cfg.keys.freecam .. " freecam, "
+        .. (Cfg.keys.aimLock or "LeftAlt") .. " aims.",
+        Theme.Accent2, 4.5)
 end
 
 -- ============================================================
--- 10. VERIFICATION GATE
+-- 10. VERIFICATION GATE  (premium animated backdrop)
 -- ============================================================
+local gateToken = 0
+
+local function buildGateBackdrop(parent)
+    local clip = create("Frame", {
+        Name = "Backdrop", Size = UDim2.fromScale(1, 1),
+        BackgroundColor3 = Theme.Bg, BorderSizePixel = 0,
+        ClipsDescendants = true, ZIndex = 0,
+    }, parent)
+    addCorner(clip, 16)
+
+    -- animated aurora
+    local aurora = create("Frame", {
+        Size = UDim2.fromScale(1.8, 1.8), Position = UDim2.fromScale(-0.4, -0.4),
+        BackgroundColor3 = Theme.White, BorderSizePixel = 0, ZIndex = 0,
+    }, clip)
+    aurora:SetAttribute("NoTheme", true)
+    local agrad = create("UIGradient", {
+        Color = ColorSequence.new({
+            ColorSequenceKeypoint.new(0.0, Theme.Bg),
+            ColorSequenceKeypoint.new(0.35, Theme.OnAccent),
+            ColorSequenceKeypoint.new(0.62, Theme.Bg2),
+            ColorSequenceKeypoint.new(1.0, Theme.Bg),
+        }),
+        Rotation = 0,
+    }, aurora)
+
+    -- glow orbs
+    local orbs = {}
+    for i = 1, 3 do
+        local orb = create("Frame", {
+            AnchorPoint = Vector2.new(0.5, 0.5),
+            Position = UDim2.fromScale(0.5, 0.5),
+            Size = UDim2.fromOffset(140, 140),
+            BackgroundColor3 = (i % 2 == 0) and Theme.Accent or Theme.Accent2,
+            BackgroundTransparency = 0.84, BorderSizePixel = 0, ZIndex = 0,
+        }, clip)
+        addCorner(orb, 999)
+        table.insert(orbs, orb)
+    end
+
+    -- moving grid
+    local grid = create("Frame", {
+        Size = UDim2.new(1, 60, 1, 60), Position = UDim2.fromOffset(-30, -30),
+        BackgroundTransparency = 1, ZIndex = 0,
+    }, clip)
+    for i = 0, 9 do
+        create("Frame", {
+            Position = UDim2.new(i / 9, 0, 0, 0), Size = UDim2.new(0, 1, 1, 0),
+            BackgroundColor3 = Theme.Accent, BackgroundTransparency = 0.9, BorderSizePixel = 0, ZIndex = 0,
+        }, grid)
+    end
+    for i = 0, 11 do
+        create("Frame", {
+            Position = UDim2.new(0, 0, i / 11, 0), Size = UDim2.new(1, 0, 0, 1),
+            BackgroundColor3 = Theme.Accent2, BackgroundTransparency = 0.9, BorderSizePixel = 0, ZIndex = 0,
+        }, grid)
+    end
+
+    -- floating particles
+    local partLayer = create("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, ZIndex = 0 }, clip)
+    local function spawnParticle()
+        if not partLayer.Parent then return end
+        local size = math.random(2, 4)
+        local p = create("Frame", {
+            AnchorPoint = Vector2.new(0.5, 0.5),
+            Position = UDim2.fromScale(math.random(), 1.08),
+            Size = UDim2.fromOffset(size, size),
+            BackgroundColor3 = (math.random() < 0.5) and Theme.Accent or Theme.Accent2,
+            BackgroundTransparency = 0.15, BorderSizePixel = 0, ZIndex = 0,
+        }, partLayer)
+        addCorner(p, 999)
+        local dur = math.random(30, 70) / 10
+        TweenService:Create(p, TweenInfo.new(dur, Enum.EasingStyle.Linear), {
+            Position = UDim2.fromScale(math.clamp(p.Position.X.Scale + (math.random(-15, 15) / 100), 0, 1), -0.08),
+            BackgroundTransparency = 1,
+        }):Play()
+        task.delay(dur, function() pcall(function() p:Destroy() end) end)
+    end
+    for _ = 1, 14 do
+        task.delay(math.random() * 40 / 10, spawnParticle)
+    end
+
+    local tok = gateToken
+    task.spawn(function()
+        local t = 0
+        while parent.Parent and gateToken == tok and Runtime.alive do
+            t += 0.05
+            pcall(function()
+                agrad.Rotation = (t * 12) % 360
+                grid.Position = UDim2.fromOffset(-30 + (t * 8) % 30, -30 + (t * 6) % 30)
+                for i, orb in ipairs(orbs) do
+                    orb.Position = UDim2.fromScale(
+                        0.5 + 0.35 * math.sin(t * (0.3 + i * 0.12) + i),
+                        0.5 + 0.35 * math.cos(t * (0.24 + i * 0.1) + i * 1.7))
+                end
+            end)
+            task.wait(0.05)
+        end
+    end)
+    task.spawn(function()
+        while parent.Parent and gateToken == tok and Runtime.alive do
+            spawnParticle()
+            task.wait(0.22)
+        end
+    end)
+    return clip
+end
+
 local function buildGate()
     local cam = workspace.CurrentCamera
     local vp = cam and cam.ViewportSize or Vector2.new(1280, 720)
@@ -5464,18 +6300,19 @@ local function buildGate()
     }, ScreenGui)
     addCorner(KeyFrame, 16)
     addStroke(KeyFrame, Theme.Hairline, 1, 0.4)
-    addGradientBorder(KeyFrame, 1.2)
+    local gateBorder = addGradientBorder(KeyFrame, 1.4)
     local basePos = KeyFrame.Position
-    local gateToken = 0
+
+    buildGateBackdrop(KeyFrame)
 
     create("TextLabel", {
         Position = UDim2.new(0, 0, 0, 14), Size = UDim2.new(1, 0, 0, 24),
-        BackgroundTransparency = 1, Text = "EKANTO // SECURE SHELL", TextSize = 16,
+        BackgroundTransparency = 1, Text = "EKANTO // SECURE SHELL", TextSize = 16, ZIndex = 2,
     }, KeyFrame)
     local shellSub = create("TextLabel", {
         Position = UDim2.new(0, 0, 0, 38), Size = UDim2.new(1, 0, 0, 14),
-        BackgroundTransparency = 1, Text = "v2.2  •  PREMIUM ACCESS", TextSize = 10,
-        TextColor3 = Theme.TextFaint,
+        BackgroundTransparency = 1, Text = "v2.3  •  PREMIUM ACCESS", TextSize = 10,
+        TextColor3 = Theme.TextFaint, ZIndex = 2,
     }, KeyFrame)
     shellSub:SetAttribute("NoBoost", true)
 
@@ -5483,17 +6320,17 @@ local function buildGate()
         Position = UDim2.new(0, 14, 0, -2),
         Size = UDim2.new(1, -28, 0, 2),
         BackgroundColor3 = Theme.Accent, BackgroundTransparency = 0.5,
-        BorderSizePixel = 0,
+        BorderSizePixel = 0, ZIndex = 3,
     }, KeyFrame)
     addCorner(scanline, 1)
 
     local bootHolder = create("Frame", {
         Position = UDim2.new(0, 26, 0, 62),
         Size = UDim2.new(1, -52, 0, 58),
-        BackgroundTransparency = 1,
+        BackgroundTransparency = 1, ZIndex = 2,
     }, KeyFrame)
     local bootLines = {
-        "> EKANTO SECURE SHELL V2.2",
+        "> EKANTO SECURE SHELL V2.3",
         "> SWEPT COLLISION MODULE ... OK",
         "> AUTH REQUIRED // AWAITING KEY",
     }
@@ -5504,14 +6341,14 @@ local function buildGate()
         Size = UDim2.new(1, -52, 0, 14),
         BackgroundTransparency = 1, Text = "",
         TextSize = 10, TextColor3 = Theme.TextFaint,
-        TextXAlignment = Enum.TextXAlignment.Left,
+        TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 2,
     }, KeyFrame)
 
     local inputBox = create("Frame", {
         AnchorPoint = Vector2.new(0.5, 0),
         Position = UDim2.new(0.5, 0, 0, 130),
         Size = UDim2.new(1, -52, 0, 44),
-        BackgroundColor3 = Theme.Surface, BorderSizePixel = 0, Visible = false,
+        BackgroundColor3 = Theme.Surface, BorderSizePixel = 0, Visible = false, ZIndex = 2,
     }, KeyFrame)
     addCorner(inputBox, 10)
     local inputStroke = addStroke(inputBox, Theme.Hairline, 1, 0.3)
@@ -5519,13 +6356,13 @@ local function buildGate()
         Size = UDim2.new(1, -60, 1, 0), Position = UDim2.fromOffset(14, 0),
         BackgroundTransparency = 1, Text = "",
         TextSize = 20, TextColor3 = Theme.Accent2,
-        TextXAlignment = Enum.TextXAlignment.Left,
+        TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 3,
     }, inputBox)
     create("TextLabel", {
         AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -12, 0.5, 0),
         Size = UDim2.fromOffset(44, 16), BackgroundTransparency = 1,
         Text = "KEY", TextSize = 10, TextColor3 = Theme.TextFaint,
-        TextXAlignment = Enum.TextXAlignment.Right,
+        TextXAlignment = Enum.TextXAlignment.Right, ZIndex = 3,
     }, inputBox)
 
     local hintLabel = create("TextLabel", {
@@ -5533,19 +6370,19 @@ local function buildGate()
         BackgroundTransparency = 1,
         Text = "keyboard or tap the keypad below",
         TextSize = 10, TextColor3 = Theme.TextFaint,
-        Visible = false,
+        Visible = false, ZIndex = 2,
     }, KeyFrame)
     local statusLabel = create("TextLabel", {
         Position = UDim2.new(0, 0, 0, 196), Size = UDim2.new(1, 0, 0, 16),
         BackgroundTransparency = 1, Text = "",
-        TextSize = 13, TextColor3 = Theme.Accent,
+        TextSize = 13, TextColor3 = Theme.Accent, ZIndex = 2,
     }, KeyFrame)
 
     local keypad = create("Frame", {
         AnchorPoint = Vector2.new(0.5, 0),
         Position = UDim2.new(0.5, 0, 0, 222),
         Size = UDim2.new(1, -52, 0, 154),
-        BackgroundTransparency = 1, Visible = false,
+        BackgroundTransparency = 1, Visible = false, ZIndex = 2,
     }, KeyFrame)
     create("UIGridLayout", {
         CellSize = UDim2.new(1 / 3, -6, 0, 33),
@@ -5559,7 +6396,7 @@ local function buildGate()
         Position = UDim2.new(0.5, 0, 0, 386),
         Size = UDim2.new(1, -52, 0, 40),
         BackgroundColor3 = Theme.Surface, Text = "VERIFY",
-        TextSize = 16, AutoButtonColor = false, BorderSizePixel = 0, Visible = false,
+        TextSize = 16, AutoButtonColor = false, BorderSizePixel = 0, Visible = false, ZIndex = 2,
     }, KeyFrame)
     addCorner(verifyBtn, 10)
     local vStroke = addStroke(verifyBtn, Theme.Accent, 1.2, 0)
@@ -5573,15 +6410,11 @@ local function buildGate()
     end))
 
     local padKeys = { "1","2","3","4","5","6","7","8","9","CLR","0","DEL" }
-    -- Forward-declare these handlers before wiring button callbacks. Without
-    -- this, the callbacks resolve to nil globals because the implementations
-    -- are defined below the keypad construction loop.
-    local pushChar, backspace, clearAll
     for i, label in ipairs(padKeys) do
         local b = create("TextButton", {
             LayoutOrder = i, Text = label, TextSize = 15,
             BackgroundColor3 = Theme.Surface, AutoButtonColor = false, BorderSizePixel = 0,
-            TextColor3 = (label == "CLR" or label == "DEL") and Theme.Accent2 or Theme.Text,
+            TextColor3 = (label == "CLR" or label == "DEL") and Theme.Accent2 or Theme.Text, ZIndex = 3,
         }, keypad)
         addCorner(b, 9)
         addStroke(b, Theme.Hairline, 1, 0.6)
@@ -5609,23 +6442,35 @@ local function buildGate()
     end
     renderInput(true)
 
-    pushChar = function(c)
+    local function pushChar(c)
         if not inputReady or busy then return end
         if #buffer < MAX_LEN then
             buffer = buffer .. c
             renderInput(true)
         end
     end
-    backspace = function()
+    local function backspace()
         if not inputReady or busy then return end
         buffer = string.sub(buffer, 1, -2)
         renderInput(true)
     end
-    clearAll = function()
+    local function clearAll()
         if not inputReady or busy then return end
         buffer = ""
         renderInput(true)
     end
+
+    -- animated glow border pulse
+    task.spawn(function()
+        local tok = gateToken
+        local on = true
+        while KeyFrame.Parent and gateToken == tok and Runtime.alive do
+            TweenService:Create(gateBorder, TweenInfo.new(1.4, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut),
+                { Transparency = on and 0.05 or 0.4, Thickness = on and 1.8 or 1.2 }):Play()
+            on = not on
+            task.wait(1.4)
+        end
+    end)
 
     task.spawn(function()
         local tok = gateToken
@@ -5669,7 +6514,7 @@ local function buildGate()
                 Position = UDim2.new(0, 0, 0, (i - 1) * 19),
                 Size = UDim2.new(1, 0, 0, 16),
                 BackgroundTransparency = 1, Text = "",
-                TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left,
+                TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 3,
                 TextColor3 = (i == #bootLines) and Theme.Accent2 or Theme.TextDim,
             }, bootHolder)
             for j = 1, #line do
@@ -5865,6 +6710,7 @@ do
         end
     end, { keep = true })
     Loop.register("Theme tween", ThemeFx.step, { keep = true })
+    Loop.register("FOV circle", FovCircle.refresh, { interval = 0.05, keep = true })
     Loop.start()
 end
 
