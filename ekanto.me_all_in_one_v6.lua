@@ -6296,7 +6296,7 @@ local function buildGate()
         Position = UDim2.new(0.5, 0, 0.5, 0),
         Size = UDim2.fromOffset(GATE_W, GATE_H),
         BackgroundColor3 = Theme.Bg,
-        BorderSizePixel = 0,
+        BorderSizePixel = 0, Active = true,
     }, ScreenGui)
     addCorner(KeyFrame, 16)
     addStroke(KeyFrame, Theme.Hairline, 1, 0.4)
@@ -6382,7 +6382,7 @@ local function buildGate()
         AnchorPoint = Vector2.new(0.5, 0),
         Position = UDim2.new(0.5, 0, 0, 222),
         Size = UDim2.new(1, -52, 0, 154),
-        BackgroundTransparency = 1, Visible = false, ZIndex = 2,
+        BackgroundTransparency = 1, Visible = false, Active = true, ZIndex = 2,
     }, KeyFrame)
     create("UIGridLayout", {
         CellSize = UDim2.new(1 / 3, -6, 0, 33),
@@ -6418,7 +6418,8 @@ local function buildGate()
         local b = create("TextButton", {
             LayoutOrder = i, Text = label, TextSize = 15,
             BackgroundColor3 = Theme.Surface, AutoButtonColor = false, BorderSizePixel = 0,
-            TextColor3 = (label == "CLR" or label == "DEL") and Theme.Accent2 or Theme.Text, ZIndex = 3,
+            TextColor3 = (label == "CLR" or label == "DEL") and Theme.Accent2 or Theme.Text,
+            Active = true, Selectable = true, ZIndex = 3,
         }, keypad)
         addCorner(b, 9)
         addStroke(b, Theme.Hairline, 1, 0.6)
@@ -6428,7 +6429,10 @@ local function buildGate()
         track(b.MouseLeave:Connect(function()
             TweenService:Create(b, HOVER_INFO, { BackgroundColor3 = Theme.Surface }):Play()
         end))
-        track(b.Activated:Connect(function()
+        -- Handle both desktop mouse clicks and mobile touch taps directly.
+        track(b.InputBegan:Connect(function(input)
+            if input.UserInputType ~= Enum.UserInputType.MouseButton1
+                and input.UserInputType ~= Enum.UserInputType.Touch then return end
             if label == "CLR" then clearAll()
             elseif label == "DEL" then backspace()
             else pushChar(label) end
