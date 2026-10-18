@@ -6410,6 +6410,10 @@ local function buildGate()
     end))
 
     local padKeys = { "1","2","3","4","5","6","7","8","9","CLR","0","DEL" }
+    -- Declare the handlers before connecting button callbacks. Otherwise the
+    -- callbacks capture unresolved globals because the implementations appear
+    -- later in this scope.
+    local pushChar, backspace, clearAll
     for i, label in ipairs(padKeys) do
         local b = create("TextButton", {
             LayoutOrder = i, Text = label, TextSize = 15,
@@ -6424,7 +6428,7 @@ local function buildGate()
         track(b.MouseLeave:Connect(function()
             TweenService:Create(b, HOVER_INFO, { BackgroundColor3 = Theme.Surface }):Play()
         end))
-        track(b.MouseButton1Click:Connect(function()
+        track(b.Activated:Connect(function()
             if label == "CLR" then clearAll()
             elseif label == "DEL" then backspace()
             else pushChar(label) end
@@ -6442,19 +6446,19 @@ local function buildGate()
     end
     renderInput(true)
 
-    local function pushChar(c)
+    pushChar = function(c)
         if not inputReady or busy then return end
         if #buffer < MAX_LEN then
             buffer = buffer .. c
             renderInput(true)
         end
     end
-    local function backspace()
+    backspace = function()
         if not inputReady or busy then return end
         buffer = string.sub(buffer, 1, -2)
         renderInput(true)
     end
-    local function clearAll()
+    clearAll = function()
         if not inputReady or busy then return end
         buffer = ""
         renderInput(true)
