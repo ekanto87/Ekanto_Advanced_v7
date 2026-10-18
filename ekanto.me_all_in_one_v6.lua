@@ -5573,6 +5573,10 @@ local function buildGate()
     end))
 
     local padKeys = { "1","2","3","4","5","6","7","8","9","CLR","0","DEL" }
+    -- Forward-declare these handlers before wiring button callbacks. Without
+    -- this, the callbacks resolve to nil globals because the implementations
+    -- are defined below the keypad construction loop.
+    local pushChar, backspace, clearAll
     for i, label in ipairs(padKeys) do
         local b = create("TextButton", {
             LayoutOrder = i, Text = label, TextSize = 15,
@@ -5605,19 +5609,19 @@ local function buildGate()
     end
     renderInput(true)
 
-    local function pushChar(c)
+    pushChar = function(c)
         if not inputReady or busy then return end
         if #buffer < MAX_LEN then
             buffer = buffer .. c
             renderInput(true)
         end
     end
-    local function backspace()
+    backspace = function()
         if not inputReady or busy then return end
         buffer = string.sub(buffer, 1, -2)
         renderInput(true)
     end
-    local function clearAll()
+    clearAll = function()
         if not inputReady or busy then return end
         buffer = ""
         renderInput(true)
