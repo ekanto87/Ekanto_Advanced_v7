@@ -3,6 +3,8 @@
     + ADVANCED COMBAT (team check, fov circle, hitbox, prediction)
     + FREECAM / AUTOCLICK / PLAYER LIST / WORLD CONTROLS
     + GATE PREMIUM ANIMATED BACKDROP
+    + GAME MODES TAB (MM2 role radar + coin farmer)
+    + freecam: mouse lock fixed, body frozen, shift hides bottom strip
     + fly: E/Q/Shift vertical removed (Space = up only)
 ]]
 
@@ -164,12 +166,14 @@ local SOUND_IDS = {
 local TOGGLE_KEYS = { "fly", "godMode", "invisible", "esp", "aura", "optimizer", "noFog", "fullBright",
     "noclip", "antiAfk", "espInfo", "espUsername", "espBox", "aimLock", "aimHead", "aimNpc", "aimFire",
     "aimPredict", "netSleep", "speedLegacy", "smartHop", "auraPlayers", "fallRescue",
-    "teamCheck", "fovCircle", "hitbox", "autoClick", "freecam", "autoJump", "antiFling" }
+    "teamCheck", "fovCircle", "hitbox", "autoClick", "freecam", "autoJump", "antiFling",
+    "mm2Roles", "mm2Notify", "mm2Coins" }
 local PASSIVE_RESTORE = { godMode = true, invisible = true, esp = true,
     optimizer = true, noFog = true, fullBright = true, antiAfk = true, espInfo = true,
     espUsername = true, espBox = true, aimLock = true, aimHead = true, aimNpc = true, aimFire = true,
     netSleep = true, smartHop = true, auraPlayers = true, fallRescue = true,
-    teamCheck = true, fovCircle = true, antiFling = true }
+    teamCheck = true, fovCircle = true, antiFling = true,
+    mm2Roles = true, mm2Notify = true, mm2Coins = true }
 
 local DEFAULT_CONFIG = {
     speed = SPEED_MIN, flySpeed = 50,
@@ -185,6 +189,8 @@ local DEFAULT_CONFIG = {
     freecam = false, freecamSpeed = 60,
     autoJump = false, jumpPower = 0,
     antiFling = true,
+    mm2Roles = false, mm2Notify = false, mm2Coins = false,
+    mm2CoinRange = 60, mm2CoinSpeed = 200,
     timeOfDay = 0, camFov = 0, gravity = 0,
     auraRadius = AURA_RADIUS_DEFAULT,
     microStep = 20, netSleep = true, speedLegacy = false, smartHop = true,
@@ -819,6 +825,8 @@ local function applyConfigData(data)
     if type(data.auraRadius) == "number" then Cfg.auraRadius = math.clamp(math.floor(data.auraRadius + 0.5), 5, 60) end
     if type(data.hitboxScale) == "number" then Cfg.hitboxScale = math.clamp(data.hitboxScale, 1, 6) end
     if type(data.autoClickCps) == "number" then Cfg.autoClickCps = math.clamp(math.floor(data.autoClickCps + 0.5), 1, 60) end
+    if type(data.mm2CoinRange) == "number" then Cfg.mm2CoinRange = math.clamp(math.floor(data.mm2CoinRange + 0.5), 10, 200) end
+    if type(data.mm2CoinSpeed) == "number" then Cfg.mm2CoinSpeed = math.clamp(math.floor(data.mm2CoinSpeed + 0.5), 20, 500) end
     if type(data.espDistance) == "number" then Cfg.espDistance = math.clamp(math.floor(data.espDistance + 0.5), 0, 2000) end
     if type(data.jumpPower) == "number" then Cfg.jumpPower = math.clamp(math.floor(data.jumpPower + 0.5), 0, 500) end
     if type(data.timeOfDay) == "number" then Cfg.timeOfDay = math.clamp(data.timeOfDay, 0, 24) end
@@ -1303,8 +1311,64 @@ function Fly.disable()
 end
 
 -- ---------- 6d2. Freecam ----------
-local Freecam = { active = false, yaw = 0, pitch = 0, pos = Vector3.zero, savedType = nil, savedWalk = nil }
+local Freecam = { active = false, yaw = 0, pitch = 0, pos = Vector3.zero, savedType = nil, savedWalk = nil,
+    savedUseJump = nil, savedJumpPower = nil, savedJumpHeight = nil,
+    mouseConn = nil, hud = nil, hudLabel = nil }
 local FREECAM_BIND = "EkantoFreecam"
+
+function Freecam.ensureHud()
+    if Freecam.hud and Freecam.hud.Parent then return end
+    local h = create("Frame", {
+        Name = "FreecamHud",
+        AnchorPoint = Vector2.new(0.5, 1),
+        Position = UDim2.new(0.5, 0, 1, -22),
+        Size = UDim2.fromOffset(340, 30),
+        BackgroundColor3 = Theme.Surface,
+        BackgroundTransparency = 0.12,
+        BorderSizePixel = 0, Active = false, ZIndex = 70,
+    }, ScreenGui)
+    addCorner(h, 9)
+    addStroke(h, Theme.Hairline, 1, 0.45)
+    Freecam.hudLabel = create("TextLabel", {
+        Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1,
+        Text = "FREECAM   WASD move   SPACE up   SHIFT down   V exit",
+        TextSize = 12, TextColor3 = Theme.Text,
+    }, h)
+    Freecam.hud = h
+end
+
+function Freecam.hideHud()
+    if Freecam.hud then pcall(function() Freecam.hud:Destroy() end) end
+    Freecam.hud, Freecam.hudLabel = nil, nil
+end
+
+-- body freeze: no walking, no jumping while the camera is detached
+function Freecam.freeze(hum)
+    if not hum then return end
+    if Freecam.savedWalk == nil then
+        Freecam.savedWalk = hum.WalkSpeed
+        Freecam.savedUseJump = hum.UseJumpPower
+        Freecam.savedJumpPower = hum.JumpPower
+        Freecam.savedJumpHeight = hum.JumpHeight
+    end
+    if hum.WalkSpeed ~= 0 then hum.WalkSpeed = 0 end
+    pcall(function()
+        if not hum.UseJumpPower then hum.UseJumpPower = true end
+        if hum.JumpPower ~= 0 then hum.JumpPower = 0 end
+    end)
+end
+
+function Freecam.thaw(hum)
+    if not hum then return end
+    pcall(function()
+        if Freecam.savedWalk ~= nil then hum.WalkSpeed = Freecam.savedWalk end
+        if Freecam.savedUseJump ~= nil then hum.UseJumpPower = Freecam.savedUseJump end
+        if Freecam.savedJumpPower ~= nil then hum.JumpPower = Freecam.savedJumpPower end
+        if Freecam.savedJumpHeight ~= nil then hum.JumpHeight = Freecam.savedJumpHeight end
+    end)
+    Freecam.savedWalk, Freecam.savedUseJump = nil, nil
+    Freecam.savedJumpPower, Freecam.savedJumpHeight = nil, nil
+end
 
 function Freecam.enable()
     local cam = workspace.CurrentCamera
@@ -1316,12 +1380,22 @@ function Freecam.enable()
     Freecam.savedType = cam.CameraType
     cam.CameraType = Enum.CameraType.Scriptable
     local _, hum = getCharacterParts()
-    if hum then
-        Freecam.savedWalk = hum.WalkSpeed
-        hum.WalkSpeed = 0
-    end
+    Freecam.freeze(hum)
+
+    -- hard mouse lock: the default camera module keeps resetting MouseBehavior back to
+    -- Default, so we force it again on every change instead of only once
+    pcall(function() UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter end)
+    if Freecam.mouseConn then pcall(function() Freecam.mouseConn:Disconnect() end) end
+    Freecam.mouseConn = UserInputService:GetPropertyChangedSignal("MouseBehavior"):Connect(function()
+        if Freecam.active and UserInputService.MouseBehavior ~= Enum.MouseBehavior.LockCenter then
+            pcall(function() UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter end)
+        end
+    end)
+
+    Freecam.ensureHud()
     pcall(function() RunService:UnbindFromRenderStep(FREECAM_BIND) end)
-    RunService:BindToRenderStep(FREECAM_BIND, Enum.RenderPriority.Camera.Value - 1, function(dt)
+    -- bind AFTER the game camera (Camera.Value + 2) so our CFrame + mouse lock win
+    RunService:BindToRenderStep(FREECAM_BIND, Enum.RenderPriority.Camera.Value + 2, function(dt)
         pcall(Freecam.step, dt)
     end)
 end
@@ -1330,13 +1404,21 @@ function Freecam.step(dt)
     if not Freecam.active then return end
     local cam = workspace.CurrentCamera
     if not cam then return end
-    pcall(function() UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter end)
+    if UserInputService.MouseBehavior ~= Enum.MouseBehavior.LockCenter then
+        pcall(function() UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter end)
+    end
+    if cam.CameraType ~= Enum.CameraType.Scriptable then
+        cam.CameraType = Enum.CameraType.Scriptable
+    end
 
     local delta = UserInputService:GetMouseDelta()
     local sens = 0.0026
     Freecam.yaw -= delta.X * sens
     Freecam.pitch = math.clamp(Freecam.pitch - delta.Y * sens, math.rad(-89), math.rad(89))
     local rot = CFrame.fromEulerAnglesYXZ(Freecam.pitch, Freecam.yaw, 0)
+
+    local shiftDown = UserInputService:IsKeyDown(Enum.KeyCode.LeftShift)
+        or UserInputService:IsKeyDown(Enum.KeyCode.RightShift)
 
     local move = Vector3.zero
     if not UserInputService:GetFocusedTextBox() then
@@ -1346,14 +1428,20 @@ function Freecam.step(dt)
         if UserInputService:IsKeyDown(Enum.KeyCode.D) then move += right end
         if UserInputService:IsKeyDown(Enum.KeyCode.A) then move -= right end
         if UserInputService:IsKeyDown(Enum.KeyCode.Space) then move += up end
-        if UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) or UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then move -= up end
+        if shiftDown or UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then move -= up end
     end
     if move.Magnitude > 0.01 then move = move.Unit * (Cfg.freecamSpeed or 60) * dt end
     Freecam.pos += move
     cam.CFrame = CFrame.new(Freecam.pos) * rot
 
+    -- SHIFT চাপা থাকলে নিচের নাম/বারটা remove হয়ে যাবে
+    if Freecam.hud then
+        local want = not shiftDown
+        if Freecam.hud.Visible ~= want then Freecam.hud.Visible = want end
+    end
+
     local _, hum = getCharacterParts()
-    if hum then hum.WalkSpeed = 0 end
+    Freecam.freeze(hum)
 end
 
 function Freecam.goto()
@@ -1368,11 +1456,13 @@ function Freecam.disable()
     if not Freecam.active then return end
     Freecam.active = false
     pcall(function() RunService:UnbindFromRenderStep(FREECAM_BIND) end)
+    if Freecam.mouseConn then pcall(function() Freecam.mouseConn:Disconnect() end); Freecam.mouseConn = nil end
+    Freecam.hideHud()
     local cam = workspace.CurrentCamera
     if cam and Freecam.savedType then cam.CameraType = Freecam.savedType end
     local _, hum = getCharacterParts()
-    if hum and Freecam.savedWalk then hum.WalkSpeed = Freecam.savedWalk end
-    Freecam.savedWalk, Freecam.savedType = nil, nil
+    Freecam.thaw(hum)
+    Freecam.savedType = nil
     pcall(function() UserInputService.MouseBehavior = Enum.MouseBehavior.Default end)
 end
 
@@ -1710,6 +1800,10 @@ function Hitbox.stop()
     end
 end
 
+-- forward declarations: ESP asks these about MM2 roles
+local RoleColorFor = function() return nil end
+local RoleLabelFor = function() return nil end
+
 -- ---------- 6g. ESP ----------
 local ESP = { folder = nil, arrowLayer = nil, highlights = {}, tags = {}, charConns = {},
     playerAdded = nil, playerRemoving = nil, handle = nil }
@@ -1721,6 +1815,8 @@ function ESP.nameOf(player)
 end
 
 function ESP.colorFor(player)
+    local roleColor = RoleColorFor(player)
+    if roleColor then return roleColor end
     if Cfg.teamCheck and LocalPlayer.Team and player.Team and LocalPlayer.Team == player.Team then
         return Theme.Green
     end
@@ -1801,12 +1897,18 @@ function ESP.update()
         else
             local from = myHrp and myHrp.Position or cam.CFrame.Position
             local dist = (root.Position - from).Magnitude
-            t.distL.Text = math.floor(dist) .. " studs"
+            local roleTag = RoleLabelFor(player)
+            t.distL.Text = math.floor(dist) .. " studs" .. (roleTag and ("  •  " .. roleTag) or "")
             local visible = (distLimit <= 0) or (dist <= distLimit)
             local hum = t.hum
             local frac = (hum and hum.MaxHealth > 0) and math.clamp(hum.Health / hum.MaxHealth, 0, 1) or 0
             t.fill.Size = UDim2.new(frac, 0, 1, 0)
             t.fill.BackgroundColor3 = HP_LOW:Lerp(HP_HIGH, frac)
+            local roleHl = ESP.highlights[player]
+            if roleHl and roleHl.Parent then
+                local col = ESP.colorFor(player)
+                if roleHl.FillColor ~= col then roleHl.FillColor = col end
+            end
             t.gui.Enabled = visible and Cfg.espInfo ~= false
             if t.boxStroke then
                 local col = ESP.colorFor(player)
@@ -1903,6 +2005,199 @@ function ESP.disable()
     for p in pairs(ESP.tags) do ESP.removeTag(p) end
     if ESP.folder then pcall(function() ESP.folder:Destroy() end); ESP.folder = nil end
     ESP.arrowLayer = nil
+end
+
+-- ============================================================
+-- 6g-bis. GAME MODES  (MM2 role radar + coin farmer)
+-- ============================================================
+local ROLE_COLORS = {
+    murderer = Color3.fromRGB(255, 62, 74),
+    sheriff  = Color3.fromRGB(64, 150, 255),
+    hero     = Color3.fromRGB(255, 200, 70),
+    innocent = Color3.fromRGB(236, 240, 255),
+}
+local ROLE_LABELS = { murderer = "MURDERER", sheriff = "SHERIFF", hero = "HERO" }
+
+local GameMode = {
+    roles = setmetatable({}, { __mode = "k" }),
+    ownHighlights = setmetatable({}, { __mode = "k" }),
+    coins = {},
+    coinScanAt = 0,
+    deepAt = 0,
+    armed = false,
+}
+
+local function dropOwnHighlight(player)
+    local h = GameMode.ownHighlights[player]
+    if h then pcall(function() h:Destroy() end) end
+    GameMode.ownHighlights[player] = nil
+end
+
+function GameMode.roleOf(player, char)
+    if not char or not char.Parent then return nil end
+    local sources = {}
+    local tool = char:FindFirstChildOfClass("Tool")
+    if tool then sources[#sources + 1] = tool.Name end
+    local bp = player:FindFirstChildOfClass("Backpack")
+    if bp then
+        for _, c in ipairs(bp:GetChildren()) do
+            if c:IsA("Tool") then sources[#sources + 1] = c.Name end
+        end
+    end
+    for _, n in ipairs(sources) do
+        local l = string.lower(n)
+        if string.find(l, "knife", 1, true) then return "murderer" end
+        if string.find(l, "gun", 1, true) or string.find(l, "revolver", 1, true)
+            or string.find(l, "pistol", 1, true) then return "sheriff" end
+    end
+    return "innocent"
+end
+
+function GameMode.syncHighlight(player, char, role)
+    if not (Cfg.mm2Roles and GameMode.armed) or not char or not role then
+        dropOwnHighlight(player)
+        return
+    end
+    if Cfg.esp then
+        dropOwnHighlight(player)
+        return
+    end
+    local h = GameMode.ownHighlights[player]
+    if not h or not h.Parent then
+        h = create("Highlight", {
+            Name = "EkantoRole",
+            Adornee = char,
+            FillColor = ROLE_COLORS[role] or ROLE_COLORS.innocent,
+            FillTransparency = 0.55,
+            OutlineColor = Color3.fromRGB(255, 255, 255),
+            OutlineTransparency = 0,
+            DepthMode = Enum.HighlightDepthMode.AlwaysOnTop,
+        }, ScreenGui)
+        GameMode.ownHighlights[player] = h
+    end
+    if h.Adornee ~= char then h.Adornee = char end
+    local col = ROLE_COLORS[role] or ROLE_COLORS.innocent
+    if h.FillColor ~= col then h.FillColor = col end
+end
+
+function GameMode.refresh()
+    if not (Cfg.mm2Roles or Cfg.mm2Notify) then
+        if GameMode.armed then
+            GameMode.armed = false
+            for _, plr in ipairs(Players:GetPlayers()) do dropOwnHighlight(plr) end
+            table.clear(GameMode.roles)
+        end
+        return
+    end
+
+    local armed = false
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer then
+            local role = GameMode.roleOf(plr, plr.Character)
+            if role and role ~= "innocent" then
+                armed = true
+                break
+            end
+        end
+    end
+    GameMode.armed = armed
+
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr ~= LocalPlayer then
+            local char = plr.Character
+            local role = GameMode.roleOf(plr, char)
+            local prev = GameMode.roles[plr]
+            if role ~= prev then
+                GameMode.roles[plr] = role
+                if Cfg.mm2Notify and prev then
+                    if role == "murderer" then
+                        Toast.show(plr.DisplayName .. " picked up the KNIFE", ROLE_COLORS.murderer, 3.5)
+                    elseif role == "sheriff" and prev ~= "sheriff" then
+                        Toast.show(plr.DisplayName .. " picked up the GUN", ROLE_COLORS.sheriff, 3.5)
+                    end
+                end
+            end
+            GameMode.syncHighlight(plr, char, role)
+        end
+    end
+end
+
+local COIN_NAMES = { coin = true, coins = true, cash = true, money = true, gem = true, gems = true,
+    token = true, tokens = true, star = true, stars = true, candy = true }
+
+local function isCoin(inst)
+    if not inst:IsA("BasePart") then return false end
+    return COIN_NAMES[string.lower(inst.Name)] == true
+end
+
+function GameMode.scanCoins()
+    local out = {}
+    for _, c in ipairs(workspace:GetChildren()) do
+        if isCoin(c) then
+            out[#out + 1] = c
+        elseif c:IsA("Folder") or c:IsA("Model") then
+            if string.find(string.lower(c.Name), "coin", 1, true) then
+                for _, d in ipairs(c:GetChildren()) do
+                    if isCoin(d) then out[#out + 1] = d end
+                end
+            end
+        end
+    end
+    if #out == 0 and (os.clock() - GameMode.deepAt) > 2 then
+        GameMode.deepAt = os.clock()
+        for _, d in ipairs(workspace:GetDescendants()) do
+            if isCoin(d) then out[#out + 1] = d end
+        end
+    end
+    if #out > 0 then GameMode.coins = out end
+    return #out
+end
+
+function GameMode.coinStep(dt)
+    if not Cfg.mm2Coins then return end
+    local _, hum, hrp = getCharacterParts()
+    if not hrp or not hum or hum.Health <= 0 then return end
+    local now = os.clock()
+    if now - GameMode.coinScanAt > 0.6 then
+        GameMode.coinScanAt = now
+        GameMode.scanCoins()
+    end
+    local range = Cfg.mm2CoinRange or 60
+    local speed = Cfg.mm2CoinSpeed or 200
+    local origin = hrp.Position
+    for _, coin in ipairs(GameMode.coins) do
+        if coin.Parent then
+            local delta = origin - coin.Position
+            local dist = delta.Magnitude
+            if dist <= range and dist > 0.01 then
+                if dist < 4.5 then
+                    coin.CFrame = CFrame.new(origin)
+                else
+                    coin.CFrame = CFrame.new(coin.Position + delta.Unit * math.min(speed * dt, dist - 3))
+                end
+            end
+        end
+    end
+end
+
+function GameMode.stop()
+    for _, plr in ipairs(Players:GetPlayers()) do dropOwnHighlight(plr) end
+    table.clear(GameMode.roles)
+    GameMode.coins = {}
+    GameMode.armed = false
+end
+
+RoleColorFor = function(player)
+    if not (Cfg.mm2Roles and GameMode.armed) then return nil end
+    local role = GameMode.roles[player]
+    if not role then return nil end
+    return ROLE_COLORS[role]
+end
+
+RoleLabelFor = function(player)
+    if not (Cfg.mm2Roles and GameMode.armed) then return nil end
+    local role = GameMode.roles[player]
+    return role and ROLE_LABELS[role] or nil
 end
 
 -- ---------- 6g2. Noclip ----------
@@ -2781,6 +3076,25 @@ function Features.antiFling(on) Cfg.antiFling = on end
 
 function Features.autoJump(on) Cfg.autoJump = on end
 
+function Features.mm2Roles(on)
+    Cfg.mm2Roles = on
+    if on then
+        guard("Role radar", "mm2Roles", GameMode.refresh)
+    else
+        for _, plr in ipairs(Players:GetPlayers()) do dropOwnHighlight(plr) end
+        for player, h in pairs(ESP.highlights) do
+            if h and h.Parent then h.FillColor = ESP.colorFor(player) end
+        end
+    end
+end
+
+function Features.mm2Notify(on) Cfg.mm2Notify = on end
+
+function Features.mm2Coins(on)
+    Cfg.mm2Coins = on
+    if on then GameMode.scanCoins() else GameMode.coins = {} end
+end
+
 for name, fn in pairs(Features) do
     Features[name] = function(on)
         guard(name, name, fn, on)
@@ -2851,6 +3165,8 @@ local function registerGameplayLoops()
     Loop.register("Anti-Fling", antiFlingStep, { feature = "antiFling" })
     Loop.register("Jump", jumpStep, { keep = true })
     Loop.register("Auto Clicker", autoClickStep, { feature = "autoClick" })
+    Loop.register("Game Mode Roles", GameMode.refresh, { interval = 0.15, keep = true })
+    Loop.register("Coin Farmer", GameMode.coinStep, { keep = true })
 end
 
 local function onCharacterAdded(char)
@@ -2861,6 +3177,8 @@ local function onCharacterAdded(char)
     AntiTrip.reset()
     Fly.reset()
     Speed.reset()
+    Freecam.savedWalk, Freecam.savedUseJump = nil, nil
+    Freecam.savedJumpPower, Freecam.savedJumpHeight = nil, nil
     task.spawn(function()
         pcall(function()
             char:WaitForChild("HumanoidRootPart", 10)
@@ -2892,6 +3210,7 @@ local function fullCleanup()
     pcall(AntiAFK.stop)
     pcall(Aim.stop)
     pcall(Freecam.disable)
+    pcall(GameMode.stop)
     ThemeFx.items = nil
     pcall(function() if Loop.conn then Loop.conn:Disconnect(); Loop.conn = nil end end)
     table.clear(Loop.handlers)
@@ -3464,6 +3783,8 @@ local function applyConfigToUI()
     slider("hitboxScale", Cfg.hitboxScale)
     slider("autoClickCps", Cfg.autoClickCps)
     slider("espDistance", Cfg.espDistance)
+    slider("mm2CoinRange", Cfg.mm2CoinRange)
+    slider("mm2CoinSpeed", Cfg.mm2CoinSpeed)
     slider("jumpPower", Cfg.jumpPower)
     slider("timeOfDay", Cfg.timeOfDay)
     slider("camFov", Cfg.camFov)
@@ -3496,7 +3817,36 @@ local function buildMain()
         BackgroundColor3 = Theme.Bg, BorderSizePixel = 0, ZIndex = 2,
     }, Main)
     addCorner(bgFill, PANEL_RADIUS)
-    create("UIGradient", { Color = ColorSequence.new(Theme.Bg2, Theme.Bg), Rotation = 90 }, bgFill)
+    local mainGrad = create("UIGradient", {
+        Color = ColorSequence.new(Theme.Bg2, Theme.Bg), Rotation = 90,
+    }, bgFill)
+    local sheen = create("Frame", {
+        Size = UDim2.new(1.6, 0, 1.6, 0), Position = UDim2.fromScale(-0.3, -0.3),
+        BackgroundColor3 = Theme.White, BackgroundTransparency = 0.94,
+        BorderSizePixel = 0, ZIndex = 2,
+    }, bgFill)
+    create("UIGradient", {
+        Color = ColorSequence.new(Theme.Accent, Theme.Accent2),
+        Transparency = NumberSequence.new({
+            NumberSequenceKeypoint.new(0, 1),
+            NumberSequenceKeypoint.new(0.46, 1),
+            NumberSequenceKeypoint.new(0.5, 0.76),
+            NumberSequenceKeypoint.new(0.54, 1),
+            NumberSequenceKeypoint.new(1, 1),
+        }),
+        Rotation = 25,
+    }, sheen)
+    task.spawn(function()
+        local t = 0
+        while Main and Main.Parent and Runtime.alive do
+            t += 0.018
+            pcall(function()
+                mainGrad.Rotation = 90 + math.sin(t * 0.7) * 10
+                sheen.Position = UDim2.fromScale(-0.3 + (t % 2.2) / 2.2, -0.3)
+            end)
+            task.wait(0.05)
+        end
+    end)
     local bgStroke = addStroke(bgFill, Theme.Hairline, 1, 0.4)
     local bgBorder = addGradientBorder(bgFill, 1.2)
 
@@ -3774,6 +4124,7 @@ local function buildMain()
 
     local movePage = createTab("Movement")
     local combatPage = createTab("Combat")
+    local gamePage = createTab("Game Modes")
     local perfPage = createTab("Performance")
     local toolsPage = createTab("Tools")
     local gamesPage = createTab("Games")
@@ -3874,7 +4225,7 @@ local function buildMain()
     createToggle(movePage, {
         key = "freecam", name = "Freecam (Detached Camera)",
         desc = "V • WASD + Space up / Shift down • mouse look",
-        tip = "Frees the camera from your character. Move around with WASD and look with the mouse. Use Teleport To Camera to snap your body over.",
+        tip = "Frees the camera from your character. Your body stays frozen (no walking, no jumping) while you fly the camera around. Shift hides the bottom strip. Use Teleport To Camera to snap your body over.",
         accent = Theme.Accent2, rebind = "freecam",
         callback = featureCallback("Freecam", Features.freecam),
     })
@@ -4074,6 +4425,61 @@ local function buildMain()
         accent = Theme.Accent2,
         callback = featureCallback("Smart Invisibility", Features.invisible),
     })
+
+    -- ---------- Game Modes ----------
+    createSection(gamePage, "Detected Game")
+    do
+        local detected = createInfo(gamePage,
+            "Current game: " .. tostring(game.Name) .. "  •  PlaceId " .. tostring(game.PlaceId)
+            .. "\nRoles are auto-detected from the tool a player is holding, so this works in Murder Mystery 2 and any MM2-style game.",
+            Theme.Off)
+        detected:SetAttribute("search", "game modes mm2 murder mystery detect place")
+    end
+
+    createSection(gamePage, "Murder Mystery 2")
+    createToggle(gamePage, {
+        key = "mm2Roles", name = "Role Radar (Murderer / Sheriff)",
+        desc = "Murderer = red • Sheriff = blue • Innocent = white",
+        tip = "Reads the tool each player holds (Knife = murderer, Gun = sheriff) and paints them through walls. Auto-detects from tools so it also works in other role games.",
+        accent = Theme.Accent,
+        callback = featureCallback("Role Radar", Features.mm2Roles),
+    })
+    createToggle(gamePage, {
+        key = "mm2Notify", name = "Role Change Alerts",
+        desc = "Toast the moment someone picks up the knife or gun",
+        tip = "Fires a notification the instant a player's role changes during a round.",
+        accent = Theme.Accent2,
+        callback = featureCallback("Role Alerts", Features.mm2Notify),
+    })
+    createInfo(gamePage,
+        "Tip: with Player ESP on, Role Radar recolors the ESP highlight instead of adding a second outline.",
+        Theme.Off)
+
+    createSection(gamePage, "Coins")
+    createToggle(gamePage, {
+        key = "mm2Coins", name = "Coin Farmer (Auto Pull)",
+        desc = "Drags nearby coins into you and collects them",
+        tip = "Scans the map for coin parts, pulls them toward you at high speed and snaps them onto your body so the touch collect fires.",
+        accent = Theme.Accent2,
+        callback = featureCallback("Coin Farmer", Features.mm2Coins),
+    })
+    createSlider(gamePage, {
+        key = "mm2CoinRange", name = "Coin Pull Range", desc = "How far coins are grabbed from • 10 - 200 studs",
+        tip = "Only coins inside this radius get pulled.",
+        min = 10, max = 200, value = Cfg.mm2CoinRange, accent = Theme.Accent,
+        onChange = function(v) Cfg.mm2CoinRange = v; scheduleSave() end,
+    })
+    createSlider(gamePage, {
+        key = "mm2CoinSpeed", name = "Coin Pull Speed", desc = "Travel speed • 20 - 500 studs/s",
+        tip = "How fast pulled coins fly toward you.",
+        min = 20, max = 500, value = Cfg.mm2CoinSpeed, accent = Theme.Accent2,
+        onChange = function(v) Cfg.mm2CoinSpeed = v; scheduleSave() end,
+    })
+    createButton(gamePage, "Scan For Coins Now", Theme.Accent,
+        "Refreshes the tracked coin list immediately.", function()
+            local n = GameMode.scanCoins()
+            Toast.show(n .. " coin(s) tracked", Theme.Accent2, 2)
+        end)
 
     -- ---------- Performance ----------
     createToggle(perfPage, {
@@ -4392,7 +4798,7 @@ local function buildMain()
         speedLegacy = "Legacy", smartHop = "Smart", auraPlayers = "AuraP", fallRescue = "Rescue",
         teamCheck = "Team", fovCircle = "FOV", hitbox = "Hitbox", autoClick = "Click",
         aimPredict = "Lead", freecam = "Cam", autoJump = "Jump", antiFling = "Fling",
-        espBox = "Box" }
+        espBox = "Box", mm2Roles = "Roles", mm2Notify = "Alerts", mm2Coins = "Coins" }
 
     local function getPing()
         local ok, v = pcall(function()
@@ -4620,9 +5026,11 @@ local function buildMain()
             }, plList)
             addCorner(row, 7)
             local friendly = Cfg.teamCheck and LocalPlayer.Team and plr.Team and LocalPlayer.Team == plr.Team
+            local role = GameMode.armed and GameMode.roles[plr]
+            local tag = role and ("  [" .. string.upper(role) .. "]") or ""
             create("TextLabel", {
                 Position = UDim2.fromOffset(9, 0), Size = UDim2.new(1, -150, 1, 0),
-                BackgroundTransparency = 1, Text = plr.DisplayName .. "  (" .. dist .. "m)",
+                BackgroundTransparency = 1, Text = plr.DisplayName .. "  (" .. dist .. "m)" .. tag,
                 TextSize = 12, TextColor3 = friendly and Theme.Green or Theme.Text,
                 TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 6,
             }, row)
@@ -5557,6 +5965,8 @@ local function buildMain()
         pcall(function() UI.sliders.hitboxScale.Set(2) end)
         pcall(function() UI.sliders.autoClickCps.Set(10) end)
         pcall(function() UI.sliders.espDistance.Set(0) end)
+        pcall(function() UI.sliders.mm2CoinRange.Set(60) end)
+        pcall(function() UI.sliders.mm2CoinSpeed.Set(200) end)
         pcall(function() UI.sliders.jumpPower.Set(0) end)
         pcall(function() UI.toggles.liteUI.Set(false, true) end)
         pcall(function() UI.toggles.perfGuard.Set(false, true) end)
@@ -5576,6 +5986,9 @@ local function buildMain()
         pcall(function() UI.toggles.freecam.Set(false, true) end)
         pcall(function() UI.toggles.autoJump.Set(false, true) end)
         pcall(function() UI.toggles.espBox.Set(false, true) end)
+        pcall(function() UI.toggles.mm2Roles.Set(false, true) end)
+        pcall(function() UI.toggles.mm2Notify.Set(false, true) end)
+        pcall(function() UI.toggles.mm2Coins.Set(false, true) end)
         pcall(function() UI.sliders.aimFov.Set(25) end)
         pcall(function() UI.sliders.aimRange.Set(150) end)
         pcall(function() UI.sliders.aimSmooth.Set(8) end)
@@ -6007,6 +6420,8 @@ local function buildMain()
         auraplayers = "auraPlayers", rescue = "fallRescue", team = "teamCheck", fov = "fovCircle",
         hitbox = "hitbox", click = "autoClick", autoclick = "autoClick", cam = "freecam",
         freecam = "freecam", jump = "autoJump", fling = "antiFling", box = "espBox", lead = "aimPredict",
+        roles = "mm2Roles", mm2 = "mm2Roles", alerts = "mm2Notify", coins = "mm2Coins",
+        coin = "mm2Coins", coinfarm = "mm2Coins",
     }
     local function runToggle(key, arg)
         local t = UI.toggles[key]
@@ -6047,6 +6462,8 @@ local function buildMain()
             return function() Aim.clearPin() end
         elseif cmd == "gotocam" then
             return function() Freecam.goto() end
+        elseif cmd == "games" then
+            return function() selectTab("Game Modes") end
         elseif (cmd == "speed" or cmd == "flyspeed") and tonumber(a1) then
             return function() UI.sliders[cmd == "speed" and "speed" or "flySpeed"].Set(tonumber(a1)) end
         elseif cmd == "aimfov" and tonumber(a1) then
@@ -6059,6 +6476,8 @@ local function buildMain()
             return function() UI.sliders.speedBrake.Set(tonumber(a1)) end
         elseif cmd == "aura" and tonumber(a1) then
             return function() UI.sliders.auraRadius.Set(tonumber(a1)) end
+        elseif cmd == "coinrange" and tonumber(a1) then
+            return function() UI.sliders.mm2CoinRange.Set(tonumber(a1)) end
         elseif (cmd == "tp" or cmd == "wp") and tonumber(a1) then
             return function() Waypoints.go(math.floor(tonumber(a1))) end
         elseif cmd == "setwp" and tonumber(a1) then
@@ -6071,7 +6490,7 @@ local function buildMain()
             return function() setWindowVisible(false) end
         elseif cmd == "help" then
             return function()
-                Toast.show("Commands: fly god invis esp aura noclip afk fog bright fps hud aim team fov hitbox click cam jump fling box lead uname sleep smart legacy rescue • theme <name> • hop [random] • rejoin • jobid • servers • pin • unpin • gotocam • speed N • brake N • aura N • aimfov N • aimrange N • micro N • tp N • setwp N • profile N", Theme.Accent, 6)
+                Toast.show("Commands: fly god invis esp aura noclip afk fog bright fps hud aim team fov hitbox click cam jump fling box lead uname sleep smart legacy rescue roles alerts coins • theme <name> • hop [random] • rejoin • jobid • servers • games • pin • unpin • gotocam • speed N • brake N • aura N • coinrange N • aimfov N • aimrange N • micro N • tp N • setwp N • profile N", Theme.Accent, 6)
             end
         end
         return nil
@@ -6201,6 +6620,22 @@ local function buildGateBackdrop(parent)
         Rotation = 0,
     }, aurora)
 
+    -- Soft vignette keeps the animated colors focused behind the content.
+    local veil = create("Frame", {
+        Size = UDim2.fromScale(1, 1), BackgroundColor3 = Theme.Black,
+        BackgroundTransparency = 0.2, BorderSizePixel = 0, ZIndex = 1,
+    }, clip)
+    veil:SetAttribute("NoTheme", true)
+    create("UIGradient", {
+        Color = ColorSequence.new(Color3.new(0, 0, 0)),
+        Transparency = NumberSequence.new({
+            NumberSequenceKeypoint.new(0, 0.74),
+            NumberSequenceKeypoint.new(0.5, 0.96),
+            NumberSequenceKeypoint.new(1, 0.74),
+        }),
+        Rotation = 90,
+    }, veil)
+
     -- glow orbs
     local orbs = {}
     for i = 1, 3 do
@@ -6213,6 +6648,20 @@ local function buildGateBackdrop(parent)
         }, clip)
         addCorner(orb, 999)
         table.insert(orbs, orb)
+    end
+
+    -- Expanding neon rings add a subtle premium radar effect.
+    local rings = {}
+    for i = 1, 3 do
+        local ring = create("Frame", {
+            AnchorPoint = Vector2.new(0.5, 0.5),
+            Position = UDim2.fromScale(0.5, 0.5),
+            Size = UDim2.fromOffset(90 + i * 42, 90 + i * 42),
+            BackgroundTransparency = 1, BorderSizePixel = 0, ZIndex = 1,
+        }, clip)
+        addCorner(ring, 999)
+        local stroke = addStroke(ring, i % 2 == 0 and Theme.Accent2 or Theme.Accent, 1.2, 0.6)
+        table.insert(rings, { frame = ring, stroke = stroke, phase = (i - 1) / 3 })
     end
 
     -- moving grid
@@ -6270,6 +6719,12 @@ local function buildGateBackdrop(parent)
                         0.5 + 0.35 * math.sin(t * (0.3 + i * 0.12) + i),
                         0.5 + 0.35 * math.cos(t * (0.24 + i * 0.1) + i * 1.7))
                 end
+                for _, item in ipairs(rings) do
+                    local phase = (t * 0.12 + item.phase) % 1
+                    local diameter = 90 + phase * 300
+                    item.frame.Size = UDim2.fromOffset(diameter, diameter)
+                    item.stroke.Transparency = 0.18 + phase * 0.78
+                end
             end)
             task.wait(0.05)
         end
@@ -6296,7 +6751,7 @@ local function buildGate()
         Position = UDim2.new(0.5, 0, 0.5, 0),
         Size = UDim2.fromOffset(GATE_W, GATE_H),
         BackgroundColor3 = Theme.Bg,
-        BorderSizePixel = 0, Active = true,
+        BorderSizePixel = 0,
     }, ScreenGui)
     addCorner(KeyFrame, 16)
     addStroke(KeyFrame, Theme.Hairline, 1, 0.4)
@@ -6410,9 +6865,8 @@ local function buildGate()
     end))
 
     local padKeys = { "1","2","3","4","5","6","7","8","9","CLR","0","DEL" }
-    -- Declare the handlers before connecting button callbacks. Otherwise the
-    -- callbacks capture unresolved globals because the implementations appear
-    -- later in this scope.
+    -- Declare handlers before wiring callbacks so keypad buttons never resolve
+    -- to accidental globals. This also keeps touch and mouse paths identical.
     local pushChar, backspace, clearAll
     for i, label in ipairs(padKeys) do
         local b = create("TextButton", {
@@ -6429,7 +6883,6 @@ local function buildGate()
         track(b.MouseLeave:Connect(function()
             TweenService:Create(b, HOVER_INFO, { BackgroundColor3 = Theme.Surface }):Play()
         end))
-        -- Handle both desktop mouse clicks and mobile touch taps directly.
         track(b.InputBegan:Connect(function(input)
             if input.UserInputType ~= Enum.UserInputType.MouseButton1
                 and input.UserInputType ~= Enum.UserInputType.Touch then return end
