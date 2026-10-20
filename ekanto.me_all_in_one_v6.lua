@@ -1,9 +1,10 @@
 --[[
-    EKANTO V2.4 "AURORA PRIME"  —  PREMIUM UI BUILD + MOVEMENT HARDENING
+    EKANTO V2.3 "AURORA"  —  PREMIUM UI BUILD + MOVEMENT HARDENING
     + ADVANCED COMBAT (team check, fov circle, hitbox, prediction)
     + FREECAM / AUTOCLICK / PLAYER LIST / WORLD CONTROLS
-    + PREMIUM ANIMATED AURORA BACKDROP (main panel + key gate)
+    + GATE PREMIUM ANIMATED BACKDROP
     + GAME MODES TAB (MM2 role radar + coin farmer)
+    + NOOB SERVER SNIPER: post-join account-age scan + auto re-hop
     + freecam: mouse lock fixed, body frozen, shift hides bottom strip
     + fly: E/Q/Shift vertical removed (Space = up only)
 ]]
@@ -39,7 +40,7 @@ local KEY_REMEMBER_SECONDS = 3600
 local GUI_NAME = "EkantoCyberPanel"
 local CONFIG_FILE = "EkantoConfig.json"
 local GAME_CONFIG_FILE = "EkantoConfig_" .. tostring(game.PlaceId) .. ".json"
-local CONFIG_VERSION = 6
+local CONFIG_VERSION = 7
 local INSTAGRAM_URL = "https://instagram.com"
 
 local Theme = {
@@ -68,18 +69,6 @@ local Theme = {
     Font = Enum.Font.GothamMedium,
 }
 
--- Premium upgrade: richer palette + glassmorphism tokens
-Theme.Glass      = Color3.fromRGB(28, 30, 42)
-Theme.GlassLight = Color3.fromRGB(42, 45, 62)
-Theme.GlowSoft   = Color3.fromRGB(120, 90, 255)
-Theme.GlowCyan   = Color3.fromRGB(0, 200, 255)
-Theme.Elevated   = Color3.fromRGB(38, 40, 54)
-Theme.Inset      = Color3.fromRGB(18, 19, 26)
-
-local BG_GRADIENT_SPEED = 18
-local ORB_COUNT = 4
-local PARTICLE_RATE = 0.18
-
 local THEME_PRESETS = {
     { name = "Aurora",  c1 = Color3.fromRGB(140, 110, 255), c2 = Color3.fromRGB(0, 216, 255),  dark = Color3.fromRGB(40, 28, 78) },
     { name = "Sunset",  c1 = Color3.fromRGB(255, 120, 90),  c2 = Color3.fromRGB(255, 84, 168), dark = Color3.fromRGB(74, 28, 34) },
@@ -87,8 +76,6 @@ local THEME_PRESETS = {
     { name = "Royal",   c1 = Color3.fromRGB(122, 116, 255), c2 = Color3.fromRGB(224, 92, 255), dark = Color3.fromRGB(38, 26, 84) },
     { name = "Gold",    c1 = Color3.fromRGB(255, 190, 74),  c2 = Color3.fromRGB(255, 140, 66), dark = Color3.fromRGB(74, 50, 14) },
     { name = "Mono",    c1 = Color3.fromRGB(230, 232, 242), c2 = Color3.fromRGB(150, 162, 205), dark = Color3.fromRGB(46, 48, 60) },
-    { name = "Cyber",   c1 = Color3.fromRGB(0, 255, 200),   c2 = Color3.fromRGB(255, 0, 180),   dark = Color3.fromRGB(12, 46, 46) },
-    { name = "Crimson", c1 = Color3.fromRGB(255, 60, 90),   c2 = Color3.fromRGB(255, 160, 60),  dark = Color3.fromRGB(60, 18, 24) },
 }
 Theme.OnDark = THEME_PRESETS[1].dark
 
@@ -218,6 +205,9 @@ local DEFAULT_CONFIG = {
     renderLevel = 0, fpsCap = 0, animCap = 0, viewDist = 0,
     liteUI = false, perfGuard = false, guardFps = 30,
     panelW = PANEL_SIZE.X.Offset, panelH = PANEL_SIZE.Y.Offset,
+    -- noob sniper state
+    noobMaxAge = 250, noobRatio = 60, hopMaxTries = 12,
+    hopPending = false, hopTries = 0, hopVerify = false, hopBad = {},
     keys = { toggleUI = "RightControl", minimize = "M", fly = "F", noclip = "N", search = "Backquote",
         aimLock = "LeftAlt", freecam = "V" },
     profiles = {},
@@ -815,6 +805,16 @@ local function migrateConfig(data)
         if type(data.keys) == "table" then data.keys.freecam = data.keys.freecam or DEFAULT_KEYS.freecam end
         v = 6
     end
+    if v < 7 then
+        data.noobMaxAge = 250
+        data.noobRatio = 60
+        data.hopMaxTries = 12
+        data.hopPending = false
+        data.hopTries = 0
+        data.hopVerify = false
+        data.hopBad = {}
+        v = 7
+    end
     data.version = v
     return data
 end
@@ -874,6 +874,21 @@ local function applyConfigData(data)
     if type(data.aimRange) == "number" then Cfg.aimRange = math.clamp(math.floor(data.aimRange + 0.5), 10, 500) end
     if type(data.microStep) == "number" then Cfg.microStep = math.clamp(math.floor(data.microStep + 0.5), MICRO_MIN, MICRO_MAX) end
     if type(data.flySpoof) == "number" then Cfg.flySpoof = math.clamp(math.floor(data.flySpoof + 0.5), 0, 100) end
+    -- noob sniper fields
+    if type(data.noobMaxAge) == "number" then Cfg.noobMaxAge = math.clamp(math.floor(data.noobMaxAge + 0.5), 7, 3000) end
+    if type(data.noobRatio) == "number" then Cfg.noobRatio = math.clamp(math.floor(data.noobRatio + 0.5), 10, 100) end
+    if type(data.hopMaxTries) == "number" then Cfg.hopMaxTries = math.clamp(math.floor(data.hopMaxTries + 0.5), 1, 40) end
+    if type(data.hopPending) == "boolean" then Cfg.hopPending = data.hopPending end
+    if type(data.hopVerify) == "boolean" then Cfg.hopVerify = data.hopVerify end
+    if type(data.hopTries) == "number" then Cfg.hopTries = math.clamp(math.floor(data.hopTries + 0.5), 0, 200) end
+    if type(data.hopBad) == "table" then
+        local clean = {}
+        for _, id in ipairs(data.hopBad) do
+            if type(id) == "string" and #id > 0 then table.insert(clean, id) end
+            if #clean >= 60 then break end
+        end
+        Cfg.hopBad = clean
+    end
     if type(data.recentGames) == "table" then
         local clean = {}
         for _, e in ipairs(data.recentGames) do
@@ -1265,6 +1280,7 @@ function Fly.step(hrp, hum, dt)
         if UserInputService:IsKeyDown(Enum.KeyCode.S) then dir -= look end
         if UserInputService:IsKeyDown(Enum.KeyCode.D) then dir += right end
         if UserInputService:IsKeyDown(Enum.KeyCode.A) then dir -= right end
+        -- vertical: ONLY Space (E/Q/Shift removed)
         if UserInputService:IsKeyDown(Enum.KeyCode.Space) then dir += up end
         if dir.Magnitude > 0.01 then target = dir.Unit * Cfg.flySpeed end
     end
@@ -1355,6 +1371,7 @@ function Freecam.hideHud()
     Freecam.hud, Freecam.hudLabel = nil, nil
 end
 
+-- body freeze: no walking, no jumping while the camera is detached
 function Freecam.freeze(hum)
     if not hum then return end
     if Freecam.savedWalk == nil then
@@ -1394,6 +1411,8 @@ function Freecam.enable()
     local _, hum = getCharacterParts()
     Freecam.freeze(hum)
 
+    -- hard mouse lock: the default camera module keeps resetting MouseBehavior back to
+    -- Default, so we force it again on every change instead of only once
     pcall(function() UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter end)
     if Freecam.mouseConn then pcall(function() Freecam.mouseConn:Disconnect() end) end
     Freecam.mouseConn = UserInputService:GetPropertyChangedSignal("MouseBehavior"):Connect(function()
@@ -1404,6 +1423,7 @@ function Freecam.enable()
 
     Freecam.ensureHud()
     pcall(function() RunService:UnbindFromRenderStep(FREECAM_BIND) end)
+    -- bind AFTER the game camera (Camera.Value + 2) so our CFrame + mouse lock win
     RunService:BindToRenderStep(FREECAM_BIND, Enum.RenderPriority.Camera.Value + 2, function(dt)
         pcall(Freecam.step, dt)
     end)
@@ -1443,6 +1463,7 @@ function Freecam.step(dt)
     Freecam.pos += move
     cam.CFrame = CFrame.new(Freecam.pos) * rot
 
+    -- SHIFT চাপা থাকলে নিচের নাম/বারটা remove হয়ে যাবে
     if Freecam.hud then
         local want = not shiftDown
         if Freecam.hud.Visible ~= want then Freecam.hud.Visible = want end
@@ -1923,6 +1944,7 @@ function ESP.update()
                 if t.boxStroke.Color ~= col then t.boxStroke.Color = col end
             end
 
+            -- box esp
             if Cfg.espBox and visible and t.box then
                 local head = char:FindFirstChild("Head")
                 local topPos = head and head.Position or (root.Position + Vector3.new(0, 2, 0))
@@ -3239,170 +3261,6 @@ end
 -- ============================================================
 -- 8. UI FRAMEWORK
 -- ============================================================
-
--- ---------- PREMIUM ANIMATED BACKGROUND (shared by panel + gate) ----------
-local function buildPremiumBackdrop(parent, opts)
-    opts = opts or {}
-    local intensity = opts.intensity or 1
-    local showGrid  = opts.grid ~= false
-
-    local clip = create("Frame", {
-        Name = "PremiumBackdrop",
-        Size = UDim2.fromScale(1, 1),
-        BackgroundColor3 = Theme.Bg,
-        BorderSizePixel = 0,
-        ClipsDescendants = true,
-        ZIndex = 0,
-    }, parent)
-    addCorner(clip, PANEL_RADIUS)
-
-    local aurora = create("Frame", {
-        Size = UDim2.fromScale(1.6, 1.6),
-        Position = UDim2.fromScale(-0.3, -0.3),
-        BackgroundColor3 = Theme.White,
-        BorderSizePixel = 0,
-        ZIndex = 0,
-    }, clip)
-    aurora:SetAttribute("NoTheme", true)
-    local agrad = create("UIGradient", {
-        Color = ColorSequence.new({
-            ColorSequenceKeypoint.new(0.0, Theme.Bg),
-            ColorSequenceKeypoint.new(0.3, Theme.OnAccent),
-            ColorSequenceKeypoint.new(0.55, Theme.Accent),
-            ColorSequenceKeypoint.new(0.8, Theme.Bg2),
-            ColorSequenceKeypoint.new(1.0, Theme.Bg),
-        }),
-        Rotation = 0,
-    }, aurora)
-
-    local orbs = {}
-    for i = 1, ORB_COUNT do
-        local size = 180 + i * 40
-        local orb = create("Frame", {
-            AnchorPoint = Vector2.new(0.5, 0.5),
-            Position = UDim2.fromScale(0.3 + 0.1 * i, 0.3 + 0.1 * i),
-            Size = UDim2.fromOffset(size, size),
-            BackgroundColor3 = (i % 2 == 0) and Theme.Accent2 or Theme.Accent,
-            BackgroundTransparency = 0.9 - (i * 0.02),
-            BorderSizePixel = 0,
-            ZIndex = 0,
-        }, clip)
-        addCorner(orb, 999)
-        table.insert(orbs, { frame = orb, phase = i * 1.7, speed = 0.2 + i * 0.05 })
-    end
-
-    local grid = nil
-    if showGrid then
-        grid = create("Frame", {
-            Size = UDim2.new(1, 40, 1, 40),
-            Position = UDim2.fromOffset(-20, -20),
-            BackgroundTransparency = 1,
-            ZIndex = 1,
-        }, clip)
-        for i = 0, 12 do
-            create("Frame", {
-                Position = UDim2.new(i / 12, 0, 0, 0),
-                Size = UDim2.new(0, 1, 1, 0),
-                BackgroundColor3 = Theme.Accent,
-                BackgroundTransparency = 0.94,
-                BorderSizePixel = 0,
-                ZIndex = 1,
-            }, grid)
-        end
-        for i = 0, 14 do
-            create("Frame", {
-                Position = UDim2.new(0, 0, i / 14, 0),
-                Size = UDim2.new(1, 0, 0, 1),
-                BackgroundColor3 = Theme.Accent2,
-                BackgroundTransparency = 0.94,
-                BorderSizePixel = 0,
-                ZIndex = 1,
-            }, grid)
-        end
-    end
-
-    local veil = create("Frame", {
-        Size = UDim2.fromScale(1, 1),
-        BackgroundColor3 = Theme.Black,
-        BackgroundTransparency = 0.55,
-        BorderSizePixel = 0,
-        ZIndex = 2,
-    }, clip)
-    veil:SetAttribute("NoTheme", true)
-    create("UIGradient", {
-        Color = ColorSequence.new(Color3.new(0, 0, 0)),
-        Transparency = NumberSequence.new({
-            NumberSequenceKeypoint.new(0, 0.85),
-            NumberSequenceKeypoint.new(0.5, 0.35),
-            NumberSequenceKeypoint.new(1, 0.85),
-        }),
-        Rotation = 90,
-    }, veil)
-
-    local particleLayer = create("Frame", {
-        Size = UDim2.fromScale(1, 1),
-        BackgroundTransparency = 1,
-        ZIndex = 3,
-    }, clip)
-
-    local function spawnSpark()
-        if not particleLayer.Parent then return end
-        local sz = math.random(2, 4)
-        local p = create("Frame", {
-            AnchorPoint = Vector2.new(0.5, 0.5),
-            Position = UDim2.fromScale(math.random(), 1.1),
-            Size = UDim2.fromOffset(sz, sz),
-            BackgroundColor3 = (math.random() < 0.5) and Theme.Accent2 or Theme.White,
-            BackgroundTransparency = 0.1,
-            BorderSizePixel = 0,
-            ZIndex = 3,
-        }, particleLayer)
-        addCorner(p, 999)
-        local dur = math.random(40, 80) / 10
-        TweenService:Create(p, TweenInfo.new(dur, Enum.EasingStyle.Linear), {
-            Position = UDim2.fromScale(
-                math.clamp(p.Position.X.Scale + (math.random(-20, 20) / 100), 0, 1),
-                -0.1
-            ),
-            BackgroundTransparency = 1,
-        }):Play()
-        task.delay(dur, function() pcall(function() p:Destroy() end) end)
-    end
-
-    local tok = gateToken
-    task.spawn(function()
-        local t = 0
-        while clip.Parent and Runtime.alive and gateToken == tok do
-            t += 0.05
-            pcall(function()
-                agrad.Rotation = (t * BG_GRADIENT_SPEED * intensity) % 360
-                if grid then
-                    grid.Position = UDim2.fromOffset(
-                        -20 + (t * 6) % 20,
-                        -20 + (t * 5) % 20
-                    )
-                end
-                for _, o in ipairs(orbs) do
-                    o.frame.Position = UDim2.fromScale(
-                        0.5 + 0.35 * math.sin(t * o.speed + o.phase),
-                        0.5 + 0.35 * math.cos(t * (o.speed * 0.8) + o.phase * 1.3)
-                    )
-                end
-            end)
-            task.wait(0.05)
-        end
-    end)
-
-    task.spawn(function()
-        while clip.Parent and Runtime.alive and gateToken == tok do
-            spawnSpark()
-            task.wait(PARTICLE_RATE)
-        end
-    end)
-
-    return clip
-end
-
 local function staggerIn(holder)
     local items = {}
     for _, c in ipairs(holder:GetChildren()) do
@@ -3651,28 +3509,10 @@ local function createCard(page, name, height, accent)
         LayoutOrder = page.order,
         Size = UDim2.new(1, -10, 0, height),
         BackgroundColor3 = Theme.Surface,
-        BackgroundTransparency = 0.05,
         BorderSizePixel = 0,
     }, page.frame)
     addCorner(card, 11)
     local stroke = addStroke(card, Theme.Hairline, 1, 0.55)
-
-    local glow = create("Frame", {
-        Size = UDim2.fromScale(1, 1),
-        BackgroundColor3 = accent or Theme.Accent,
-        BackgroundTransparency = 1,
-        BorderSizePixel = 0,
-        ZIndex = 0,
-    }, card)
-    addCorner(glow, 11)
-
-    track(card.MouseEnter:Connect(function()
-        TweenService:Create(glow, HOVER_INFO, { BackgroundTransparency = 0.92 }):Play()
-    end))
-    track(card.MouseLeave:Connect(function()
-        TweenService:Create(glow, HOVER_INFO, { BackgroundTransparency = 1 }):Play()
-    end))
-
     track(card.InputBegan:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton2 and CardContext.open then
             guard("Context menu", nil, CardContext.open, card)
@@ -3982,6 +3822,10 @@ local function applyConfigToUI()
         "aimFov", "aimSmooth", "aimRange", "speedBrake" }) do
         slider(key, Cfg[key])
     end
+    slider("hopMax", Cfg.hopMax)
+    slider("noobMaxAge", Cfg.noobMaxAge)
+    slider("noobRatio", Cfg.noobRatio)
+    slider("hopMaxTries", Cfg.hopMaxTries)
     for _, k in ipairs(TOGGLE_KEYS) do toggle(k, Cfg[k] and PASSIVE_RESTORE[k] == true) end
     if #missing > 0 then
         Toast.show("Config restore: missing " .. table.concat(missing, ", "), Theme.Red, 5)
@@ -4001,56 +3845,18 @@ local function buildMain()
 
     local shadowParts = addPanelShadow(Main)
 
-    -- ===== PREMIUM ANIMATED BACKGROUND =====
-    local backdrop = buildPremiumBackdrop(Main, { intensity = 1.2, grid = true })
-    backdrop.ZIndex = 2
-    backdrop.Size = UDim2.fromScale(1, 1)
-
     local bgFill = create("Frame", {
-        Name = "GlassOverlay",
-        Size = UDim2.fromScale(1, 1),
-        BackgroundColor3 = Theme.Glass,
-        BackgroundTransparency = 0.78,
-        BorderSizePixel = 0,
-        ZIndex = 3,
+        Name = "BgFill", Size = UDim2.fromScale(1, 1),
+        BackgroundColor3 = Theme.Bg, BorderSizePixel = 0, ZIndex = 2,
     }, Main)
     addCorner(bgFill, PANEL_RADIUS)
-
-    local sheen = create("Frame", {
-        Size = UDim2.new(1, 0, 0.35, 0),
-        Position = UDim2.fromScale(0, 0),
-        BackgroundColor3 = Theme.White,
-        BackgroundTransparency = 0.96,
-        BorderSizePixel = 0,
-        ZIndex = 3,
-    }, bgFill)
-    addCorner(sheen, PANEL_RADIUS)
-    local sheenGradient = create("UIGradient", {
-        Color = ColorSequence.new(Theme.White, Theme.White),
-        Transparency = NumberSequence.new({
-            NumberSequenceKeypoint.new(0, 0.9),
-            NumberSequenceKeypoint.new(1, 1),
-        }),
-        Rotation = 90,
-    }, sheen)
-    task.spawn(function()
-        local t = 0
-        while Main and Main.Parent and Runtime.alive do
-            t += 0.018
-            pcall(function()
-                sheen.Position = UDim2.fromScale(-0.15 + (t % 2.3) / 2.3, -0.05)
-                sheenGradient.Rotation = 70 + math.sin(t * 0.8) * 18
-            end)
-            task.wait(0.05)
-        end
-    end)
-
-    local bgStroke = addStroke(bgFill, Theme.Hairline, 1, 0.35)
-    local bgBorder = addGradientBorder(bgFill, 1.4)
+    create("UIGradient", { Color = ColorSequence.new(Theme.Bg2, Theme.Bg), Rotation = 90 }, bgFill)
+    local bgStroke = addStroke(bgFill, Theme.Hairline, 1, 0.4)
+    local bgBorder = addGradientBorder(bgFill, 1.2)
 
     local body = create("CanvasGroup", {
         Name = "Panel", Size = UDim2.fromScale(1, 1),
-        BackgroundTransparency = 1, BorderSizePixel = 0, ZIndex = 4,
+        BackgroundTransparency = 1, BorderSizePixel = 0, ZIndex = 3,
         GroupTransparency = 0,
     }, Main)
 
@@ -4065,41 +3871,39 @@ local function buildMain()
         Name = "Sidebar",
         Position = UDim2.new(0, 10, 0, 10),
         Size = UDim2.new(0, SIDEBAR_W, 1, -20),
-        BackgroundColor3 = Theme.GlassLight,
-        BackgroundTransparency = 0.55,
-        BorderSizePixel = 0,
-        ZIndex = 5,
+        BackgroundColor3 = Theme.Bg2, BackgroundTransparency = 0.35,
+        BorderSizePixel = 0, ZIndex = 3,
     }, body)
     addCorner(sidebar, 12)
-    addStroke(sidebar, Theme.Accent, 1, 0.7)
+    addStroke(sidebar, Theme.Hairline, 1, 0.55)
 
     local logo = create("Frame", {
-        Size = UDim2.new(1, 0, 0, 64), BackgroundTransparency = 1, ZIndex = 6,
+        Size = UDim2.new(1, 0, 0, 64), BackgroundTransparency = 1, ZIndex = 4,
     }, sidebar)
     local logoText = create("TextLabel", {
         Position = UDim2.fromOffset(16, 14), Size = UDim2.new(1, -32, 0, 22),
         BackgroundTransparency = 1, Text = "EKANTO", TextSize = 20,
-        TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 7,
+        TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5,
     }, logo)
     logoText:SetAttribute("NoBoost", true)
     create("UIGradient", { Color = ColorSequence.new(Theme.Accent, Theme.Accent2), Rotation = 0 }, logoText)
     local verLabel = create("TextLabel", {
         Position = UDim2.fromOffset(16, 36), Size = UDim2.new(1, -32, 0, 14),
-        BackgroundTransparency = 1, Text = "v2.4  •  PRIME", TextSize = 10,
-        TextColor3 = Theme.TextFaint, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 7,
+        BackgroundTransparency = 1, Text = "v2.3  •  PRO", TextSize = 10,
+        TextColor3 = Theme.TextFaint, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5,
     }, logo)
     verLabel:SetAttribute("NoBoost", true)
     local dot = create("Frame", {
         AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -14, 0.5, 2),
         Size = UDim2.fromOffset(8, 8), BackgroundColor3 = Theme.Green,
-        BorderSizePixel = 0, ZIndex = 7,
+        BorderSizePixel = 0, ZIndex = 5,
     }, logo)
     addCorner(dot, 4)
 
     local navList = create("ScrollingFrame", {
         Position = UDim2.new(0, 8, 0, 68),
         Size = UDim2.new(1, -16, 1, -140),
-        BackgroundTransparency = 1, BorderSizePixel = 0, ZIndex = 6,
+        BackgroundTransparency = 1, BorderSizePixel = 0, ZIndex = 4,
         ScrollBarThickness = 0, CanvasSize = UDim2.new(0, 0, 0, 0),
         AutomaticCanvasSize = Enum.AutomaticSize.Y, ScrollingDirection = Enum.ScrollingDirection.Y,
     }, sidebar)
@@ -4109,24 +3913,24 @@ local function buildMain()
         AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 8, 1, -10),
         Size = UDim2.new(1, -16, 0, 54),
         BackgroundColor3 = Theme.Surface, BackgroundTransparency = 0.15,
-        BorderSizePixel = 0, ZIndex = 7,
+        BorderSizePixel = 0, ZIndex = 5,
     }, sidebar)
     addCorner(sbFooter, 10)
     addStroke(sbFooter, Theme.Hairline, 1, 0.5)
 
     local avWrap = create("Frame", {
         Position = UDim2.fromOffset(8, 10), Size = UDim2.fromOffset(34, 34),
-        BackgroundColor3 = Theme.Bg, BorderSizePixel = 0, ZIndex = 8,
+        BackgroundColor3 = Theme.Bg, BorderSizePixel = 0, ZIndex = 6,
     }, sbFooter)
     addCorner(avWrap, 17)
     addStroke(avWrap, Theme.Accent, 1.5, 0.25)
     local avatar = create("ImageLabel", {
-        Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Image = "", ZIndex = 9,
+        Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Image = "", ZIndex = 7,
     }, avWrap)
     addCorner(avatar, 17)
     local avDot = create("Frame", {
         Position = UDim2.fromOffset(31, 33), Size = UDim2.fromOffset(9, 9),
-        BackgroundColor3 = Theme.Green, BorderSizePixel = 0, ZIndex = 11,
+        BackgroundColor3 = Theme.Green, BorderSizePixel = 0, ZIndex = 9,
     }, sbFooter)
     addCorner(avDot, 5)
     addStroke(avDot, Theme.Surface, 2, 0)
@@ -4134,14 +3938,14 @@ local function buildMain()
     local nameLbl = create("TextLabel", {
         Position = UDim2.fromOffset(50, 11), Size = UDim2.new(1, -58, 0, 14),
         BackgroundTransparency = 1, Text = LocalPlayer.DisplayName, TextSize = 12,
-        TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 9,
+        TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 7,
     }, sbFooter)
     nameLbl:SetAttribute("NoBoost", true)
     local handleLbl = create("TextLabel", {
         Position = UDim2.fromOffset(50, 27), Size = UDim2.new(1, -58, 0, 12),
         BackgroundTransparency = 1, Text = "@" .. LocalPlayer.Name, TextSize = 10,
         TextColor3 = Theme.TextFaint, TextXAlignment = Enum.TextXAlignment.Left,
-        TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 9,
+        TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 7,
     }, sbFooter)
     handleLbl:SetAttribute("NoBoost", true)
 
@@ -4158,19 +3962,19 @@ local function buildMain()
         Name = "Content",
         Position = UDim2.new(0, SIDEBAR_W + 20, 0, 0),
         Size = UDim2.new(1, -(SIDEBAR_W + 20), 1, 0),
-        BackgroundTransparency = 1, ZIndex = 5,
+        BackgroundTransparency = 1, ZIndex = 3,
     }, body)
 
     local header = create("Frame", {
         Position = UDim2.new(0, 12, 0, 12),
         Size = UDim2.new(1, -24, 0, 38),
-        BackgroundTransparency = 1, Active = true, ZIndex = 6,
+        BackgroundTransparency = 1, Active = true, ZIndex = 4,
     }, content)
 
     local pageTitle = create("TextLabel", {
         Position = UDim2.fromOffset(2, 0), Size = UDim2.new(0, 118, 1, 0),
         BackgroundTransparency = 1, Text = "Movement", TextSize = 18,
-        TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 7,
+        TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5,
     }, header)
 
     local function makeHeaderButton(name, text, xOffset, hoverColor)
@@ -4179,7 +3983,7 @@ local function buildMain()
             Position = UDim2.new(1, xOffset, 0.5, 0),
             Size = UDim2.new(0, 30, 0, 30),
             BackgroundColor3 = Theme.Surface, Text = text, TextSize = 16,
-            AutoButtonColor = false, ZIndex = 8,
+            AutoButtonColor = false, ZIndex = 6,
         }, header)
         addCorner(btn, 9)
         addStroke(btn, Theme.Hairline, 1, 0.5)
@@ -4210,7 +4014,7 @@ local function buildMain()
         AnchorPoint = Vector2.new(0, 0.5),
         BackgroundColor3 = Theme.Surface, Text = "", PlaceholderText = "Search or run a command...",
         PlaceholderColor3 = Theme.TextFaint, ClearTextOnFocus = false,
-        TextSize = 13, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 8,
+        TextSize = 13, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 6,
     }, header)
     addCorner(searchBox, 9)
     local searchStroke = addStroke(searchBox, Theme.Hairline, 1, 0.5)
@@ -4224,7 +4028,7 @@ local function buildMain()
     local clearBtn = create("TextButton", {
         AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -8, 0.5, 0),
         Size = UDim2.fromOffset(18, 18), BackgroundTransparency = 1, Text = "×",
-        TextSize = 16, TextColor3 = Theme.TextDim, Visible = false, AutoButtonColor = false, ZIndex = 10,
+        TextSize = 16, TextColor3 = Theme.TextDim, Visible = false, AutoButtonColor = false, ZIndex = 8,
     }, searchBox)
 
     makeDraggable(header, Main, nil, nil, true)
@@ -4255,20 +4059,20 @@ local function buildMain()
         local item = create("TextButton", {
             LayoutOrder = tabOrder, Size = UDim2.new(1, 0, 0, 38),
             BackgroundColor3 = Theme.Surface, BackgroundTransparency = 1,
-            Text = "", AutoButtonColor = false, ZIndex = 7,
+            Text = "", AutoButtonColor = false, ZIndex = 5,
         }, navList)
         addCorner(item, 9)
 
         local hl = create("Frame", {
             Size = UDim2.fromScale(1, 1), BackgroundColor3 = Theme.Accent,
-            BackgroundTransparency = 0.88, BorderSizePixel = 0, ZIndex = 7, Visible = false,
+            BackgroundTransparency = 0.88, BorderSizePixel = 0, ZIndex = 5, Visible = false,
         }, item)
         addCorner(hl, 9)
 
         local bar = create("Frame", {
             AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 0, 0.5, 0),
             Size = UDim2.fromOffset(3, 18), BackgroundColor3 = Theme.Accent,
-            BorderSizePixel = 0, ZIndex = 8, Visible = false,
+            BorderSizePixel = 0, ZIndex = 6, Visible = false,
         }, item)
         addCorner(bar, 2)
         addGradient(bar, Theme.Accent, Theme.Accent2, 90)
@@ -4276,7 +4080,7 @@ local function buildMain()
         local label = create("TextLabel", {
             Position = UDim2.fromOffset(17, 0), Size = UDim2.new(1, -22, 1, 0),
             BackgroundTransparency = 1, Text = name, TextSize = 14,
-            TextColor3 = Theme.TextDim, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 8,
+            TextColor3 = Theme.TextDim, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 6,
         }, item)
 
         local frame = create("ScrollingFrame", {
@@ -4286,7 +4090,7 @@ local function buildMain()
             ScrollBarThickness = 3, ScrollBarImageColor3 = Theme.Hairline,
             CanvasSize = UDim2.new(0, 0, 0, 0),
             ScrollingDirection = Enum.ScrollingDirection.Y,
-            Visible = false, ZIndex = 6,
+            Visible = false, ZIndex = 4,
         }, content)
         create("UIPadding", { PaddingLeft = UDim.new(0, 2), PaddingTop = UDim.new(0, 4), PaddingBottom = UDim.new(0, 8) }, frame)
         local layout = create("UIListLayout", {
@@ -4894,7 +4698,7 @@ local function buildMain()
         local btn = create("TextButton", {
             AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -14, 0.5, 0),
             Size = UDim2.fromOffset(130, 32), BackgroundColor3 = Theme.Bg,
-            Text = "", TextSize = 13, AutoButtonColor = false, ZIndex = 7,
+            Text = "", TextSize = 13, AutoButtonColor = false, ZIndex = 5,
         }, card)
         addCorner(btn, 9)
         local bStroke = addStroke(btn, Theme.Hairline, 1, 0.5)
@@ -4964,7 +4768,7 @@ local function buildMain()
             local b = create("TextButton", {
                 AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, xOff, 0.5, 0),
                 Size = UDim2.fromOffset(68, 30), BackgroundColor3 = Theme.Bg,
-                Text = text, TextSize = 13, AutoButtonColor = false, ZIndex = 7,
+                Text = text, TextSize = 13, AutoButtonColor = false, ZIndex = 5,
             }, card)
             addCorner(b, 8)
             addStroke(b, color, 1, 0.35)
@@ -5160,7 +4964,7 @@ local function buildMain()
     local plList = create("ScrollingFrame", {
         Position = UDim2.new(0, 12, 0, 58), Size = UDim2.new(1, -24, 1, -70),
         BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 3,
-        ScrollBarImageColor3 = Theme.Hairline, CanvasSize = UDim2.new(), ZIndex = 6,
+        ScrollBarImageColor3 = Theme.Hairline, CanvasSize = UDim2.new(), ZIndex = 4,
     }, plCard)
     local plLayout = create("UIListLayout", { Padding = UDim.new(0, 5), SortOrder = Enum.SortOrder.LayoutOrder }, plList)
     track(plLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
@@ -5222,7 +5026,7 @@ local function buildMain()
             local dist = (myHrp and hrp) and math.floor((hrp.Position - myHrp.Position).Magnitude) or 0
             local row = create("TextButton", {
                 LayoutOrder = i, Size = UDim2.new(1, -6, 0, 30), BackgroundColor3 = Theme.Bg,
-                Text = "", AutoButtonColor = false, ZIndex = 7,
+                Text = "", AutoButtonColor = false, ZIndex = 5,
             }, plList)
             addCorner(row, 7)
             local friendly = Cfg.teamCheck and LocalPlayer.Team and plr.Team and LocalPlayer.Team == plr.Team
@@ -5232,13 +5036,13 @@ local function buildMain()
                 Position = UDim2.fromOffset(9, 0), Size = UDim2.new(1, -150, 1, 0),
                 BackgroundTransparency = 1, Text = plr.DisplayName .. "  (" .. dist .. "m)" .. tag,
                 TextSize = 12, TextColor3 = friendly and Theme.Green or Theme.Text,
-                TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 8,
+                TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 6,
             }, row)
             local function rowBtn(text, xOff, color, fn)
                 local b = create("TextButton", {
                     AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, xOff, 0.5, 0),
                     Size = UDim2.fromOffset(52, 22), BackgroundColor3 = Theme.Surface,
-                    Text = text, TextSize = 11, AutoButtonColor = false, ZIndex = 8,
+                    Text = text, TextSize = 11, AutoButtonColor = false, ZIndex = 6,
                 }, row)
                 addCorner(b, 6)
                 addStroke(b, color, 1, 0.4)
@@ -5333,7 +5137,7 @@ local function buildMain()
             local b = create("TextButton", {
                 AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, xOff, 0.5, 0),
                 Size = UDim2.fromOffset(48, 30), BackgroundColor3 = Theme.Bg,
-                Text = text, TextSize = 13, AutoButtonColor = false, ZIndex = 7,
+                Text = text, TextSize = 13, AutoButtonColor = false, ZIndex = 5,
             }, card)
             b:SetAttribute("NoBoost", true)
             addCorner(b, 8)
@@ -5359,7 +5163,7 @@ local function buildMain()
     -- ---------- Servers ----------
     createSection(toolsPage, "Servers")
     local TeleportService = game:GetService("TeleportService")
-    local Hop = { busy = false, bad = {}, list = nil, idx = 0, pending = nil, tries = 0 }
+    local Hop = { busy = false, list = nil, idx = 0, pending = nil, fails = 0 }
 
     local function httpGet(url)
         local body
@@ -5395,6 +5199,22 @@ local function buildMain()
         return servers, nil
     end
 
+    -- persistent "sweaty" server list (survives teleports)
+    local function isBadServer(id)
+        for _, b in ipairs(Cfg.hopBad or {}) do
+            if b == id then return true end
+        end
+        return false
+    end
+    local function markBadServer(id)
+        if type(id) ~= "string" or id == "" then return end
+        Cfg.hopBad = Cfg.hopBad or {}
+        if not isBadServer(id) then
+            table.insert(Cfg.hopBad, id)
+            while #Cfg.hopBad > 60 do table.remove(Cfg.hopBad, 1) end
+        end
+    end
+
     local function hopScore(sv, limit)
         local playing = tonumber(sv.playing) or 0
         local maxP = math.max(tonumber(sv.maxPlayers) or 1, 1)
@@ -5402,6 +5222,7 @@ local function buildMain()
         local popScore = 1 - math.clamp(playing / math.max(limit, 1), 0, 1)
         local fillScore = 1 - math.clamp(fill, 0, 1)
         local freshBonus = (playing <= 4) and 1 or 0
+        local soloBonus = (playing <= 2) and 0.6 or 0
         local fpsScore = 0.5
         if type(sv.fps) == "number" and sv.fps > 0 then
             fpsScore = math.clamp(sv.fps / 60, 0, 1)
@@ -5410,34 +5231,68 @@ local function buildMain()
         if type(sv.ping) == "number" and sv.ping > 0 then
             pingScore = 1 - math.clamp(sv.ping / 200, 0, 1)
         end
-        return popScore * 0.40 + fillScore * 0.25 + freshBonus * 0.20 + fpsScore * 0.10 + pingScore * 0.05
+        return popScore * 0.34 + fillScore * 0.18 + freshBonus * 0.20 + soloBonus * 0.14
+            + fpsScore * 0.08 + pingScore * 0.06
+    end
+
+    -- ---------- NOOB DETECTION (post-join, uses real account ages) ----------
+    local function serverNoobStats()
+        local sum, noobs, count = 0, 0, 0
+        local limit = Cfg.noobMaxAge or 250
+        for _, plr in ipairs(Players:GetPlayers()) do
+            if plr ~= LocalPlayer then
+                local age = tonumber(plr.AccountAge) or 0
+                sum += age
+                count += 1
+                if age <= limit then noobs += 1 end
+            end
+        end
+        if count == 0 then return { count = 0, avg = 0, ratio = 1, noobs = 0 } end
+        return { count = count, avg = sum / count, ratio = noobs / count, noobs = noobs }
+    end
+
+    local function isNoobServer(stats)
+        if stats.count == 0 then return true end
+        local limit = Cfg.noobMaxAge or 250
+        local ratio = (Cfg.noobRatio or 60) / 100
+        if stats.count <= 2 then
+            return stats.ratio >= 0.5 or stats.avg <= limit * 2
+        end
+        return stats.avg <= limit or stats.ratio >= ratio
     end
 
     local function tryNext()
         if not Hop.list then Hop.busy = false return end
         Hop.idx += 1
-        Hop.tries += 1
+        Cfg.hopTries = (Cfg.hopTries or 0) + 1
         local sv = Hop.list[Hop.idx]
-        if not sv or Hop.tries > 4 then
+        if not sv then
             Hop.busy, Hop.pending, Hop.list = false, nil, nil
-            Toast.show("Couldn't join a server (full or blocked). Try again.", Theme.Red, 3.5)
+            Toast.show("No more candidate servers. Press the hunt button again.", Theme.Red, 4)
             return
         end
         Hop.pending = sv.id
+        Cfg.hopPending = true
         pcall(saveConfig)
-        Toast.show("Joining server with " .. tostring(sv.playing) .. " player(s)...", Theme.Accent2, 3)
+        Toast.show("Hopping to " .. tostring(sv.playing) .. "/" .. tostring(sv.maxPlayers) .. " server...", Theme.Accent2, 3)
         local ok = pcall(function()
             TeleportService:TeleportToPlaceInstance(game.PlaceId, sv.id, LocalPlayer)
         end)
         if not ok then
-            Hop.bad[sv.id] = true
+            markBadServer(sv.id)
+            Hop.fails = (Hop.fails or 0) + 1
+            if Hop.fails >= 5 then
+                Hop.busy, Hop.list = false, nil
+                Toast.show("Teleport kept failing.", Theme.Red, 3.5)
+                return
+            end
             tryNext()
         end
     end
 
     track(TeleportService.TeleportInitFailed:Connect(function(player)
         if player == LocalPlayer and Hop.pending then
-            Hop.bad[Hop.pending] = true
+            markBadServer(Hop.pending)
             Hop.pending = nil
             task.delay(0.5, tryNext)
         end
@@ -5449,16 +5304,16 @@ local function buildMain()
             Toast.show("This is a private server. Public server list doesn't apply.", Theme.Red, 3.5)
             return
         end
-        Hop.busy, Hop.tries = true, 0
-        Toast.show("Searching servers...", Theme.Accent, 2)
+        if mode == "noob" then Cfg.hopVerify = true end
+        Hop.busy, Hop.fails = true, 0
+        Toast.show(mode == "noob" and "Scanning for noob servers..." or "Searching servers...", Theme.Accent, 2)
         task.spawn(function()
             local servers, err = Hop.fetch()
             local pool = {}
-            local minPop = (mode == "low" and Cfg.smartHop) and 0 or 1
             for _, sv in ipairs(servers) do
-                if type(sv.id) == "string" and sv.id ~= game.JobId and not Hop.bad[sv.id]
+                if type(sv.id) == "string" and sv.id ~= game.JobId and not isBadServer(sv.id)
                     and type(sv.playing) == "number" and type(sv.maxPlayers) == "number"
-                    and sv.playing >= minPop and sv.playing < sv.maxPlayers then
+                    and sv.playing >= 1 and sv.playing < sv.maxPlayers then
                     table.insert(pool, sv)
                 end
             end
@@ -5467,9 +5322,8 @@ local function buildMain()
                 Toast.show(err and ("Server search failed: " .. err) or "No other open servers found.", Theme.Red, 3.5)
                 return
             end
-            table.sort(pool, function(a, b) return a.playing < b.playing end)
             local list = {}
-            if mode == "low" then
+            if mode == "noob" or mode == "low" then
                 local limit = Cfg.hopMax or 8
                 local under = {}
                 for _, sv in ipairs(pool) do
@@ -5488,9 +5342,11 @@ local function buildMain()
                     end
                     table.sort(scored, function(a, b) return a.score > b.score end)
                     for _, e in ipairs(scored) do table.insert(list, e.sv) end
-                    local top = scored[1]
-                    Toast.show(string.format("Smart matchmaking: freshest lobby %d/%d players (fresh score %.0f%%)",
-                        top.sv.playing, top.sv.maxPlayers, top.score * 100), Theme.Accent, 3.5)
+                    if mode == "noob" then
+                        local top = scored[1]
+                        Toast.show(string.format("Best low-pop lobby: %d/%d players (fresh score %.0f%%)",
+                            top.sv.playing, top.sv.maxPlayers, top.score * 100), Theme.Accent, 3.5)
+                    end
                 else
                     list = under
                     for i = #list, 2, -1 do
@@ -5510,13 +5366,57 @@ local function buildMain()
         end)
     end
 
+    -- called on every fresh script run after a hop: verifies the lobby is actually a noob lobby
+    local function resumeHopIfPending()
+        if not Cfg.hopPending then return end
+        Cfg.hopPending = false
+        local verify = Cfg.hopVerify
+        Cfg.hopVerify = false
+        local stats = serverNoobStats()
+        local verdict = (stats.count == 0)
+            and "empty lobby"
+            or ("avg account age " .. math.floor(stats.avg) .. "d, " .. stats.noobs .. "/" .. stats.count .. " noobs")
+        if not verify then
+            scheduleSave()
+            Toast.show("Joined server (" .. verdict .. ")", Theme.Accent2, 3)
+            return
+        end
+        if isNoobServer(stats) then
+            Cfg.hopBad, Cfg.hopTries = {}, 0
+            scheduleSave()
+            Toast.show("NOOB SERVER FOUND: " .. verdict .. ". Happy farming!", Theme.Green, 6)
+            return
+        end
+        markBadServer(game.JobId)
+        local tries = Cfg.hopTries or 0
+        if tries >= (Cfg.hopMaxTries or 12) then
+            Cfg.hopTries = 0
+            scheduleSave()
+            Toast.show("Stopped after " .. tries .. " hops. This server: " .. verdict, Theme.Amber, 6)
+            return
+        end
+        scheduleSave()
+        Toast.show("Too sweaty (" .. verdict .. "). Hunting again...", Theme.Red, 4)
+        task.delay(2.5, function()
+            if Runtime.alive and not Hop.busy then
+                guard("Noob sniper", nil, startHop, "noob")
+            end
+        end)
+    end
+
     local serverCard = createCard(toolsPage, "ServerInfo", 60, Theme.Off)
-    serverCard:SetAttribute("search", "server players count current low population hop join")
+    serverCard:SetAttribute("search", "server players count current low population hop join noob account age")
     local serverDesc = cardLabels(serverCard, "Current Server", "...")
     local function refreshServerInfo()
         local n = #Players:GetPlayers()
         local mx = Players.MaxPlayers
-        serverDesc.Text = n .. " / " .. tostring(mx) .. " players"
+        local stats = serverNoobStats()
+        local extra = ""
+        if stats.count > 0 then
+            extra = "  •  avg age " .. math.floor(stats.avg) .. "d  •  "
+                .. stats.noobs .. "/" .. stats.count .. " noobs"
+        end
+        serverDesc.Text = n .. " / " .. tostring(mx) .. " players" .. extra
     end
     refreshServerInfo()
     task.spawn(function()
@@ -5534,20 +5434,55 @@ local function buildMain()
         callback = function(on) Cfg.smartHop = on and true or false; scheduleSave() end,
     })
     createInfo(toolsPage,
-        "Matchmaking note: the public server list gives id, population, max players, fps and ping - not uptime or account ages. Smart Matchmaking ranks on those real signals.", Theme.Off)
+        "Matchmaking note: the public server list gives id, population, max players, fps and ping - not uptime or account ages. "
+        .. "So the NOOB HUNT joins a low-pop lobby first, then reads every player's real AccountAge and re-hops until the lobby is actually full of noobs.", Theme.Off)
 
     createSlider(toolsPage, {
         key = "hopMax", name = "Low-Pop Limit", desc = "Max players allowed in the server • 1 - 30",
-        tip = "Join Low-Pop Server only picks servers with this many players or fewer.",
+        tip = "Join Low-Pop / Hunt Noob only picks servers with this many players or fewer.",
         min = 1, max = 30, value = Cfg.hopMax or 8, accent = Theme.Accent,
         onChange = function(v) Cfg.hopMax = v; scheduleSave() end,
     })
+    createSlider(toolsPage, {
+        key = "noobMaxAge", name = "Noob Account Age Limit", desc = "Accounts newer than this (days) count as noob • 7 - 3000",
+        tip = "A lobby is 'noob' if the average account age is at or below this, OR enough players are under it (see Noob Ratio). Lower = stricter.",
+        min = 7, max = 3000, value = Cfg.noobMaxAge or 250, accent = Theme.Green,
+        onChange = function(v) Cfg.noobMaxAge = v; scheduleSave() end,
+    })
+    createSlider(toolsPage, {
+        key = "noobRatio", name = "Noob Ratio %", desc = "% of players that must be noob to accept • 10 - 100",
+        tip = "If this share of the lobby is under the age limit, the server is accepted even if the average is higher.",
+        min = 10, max = 100, value = Cfg.noobRatio or 60, accent = Theme.Green,
+        onChange = function(v) Cfg.noobRatio = v; scheduleSave() end,
+    })
+    createSlider(toolsPage, {
+        key = "hopMaxTries", name = "Max Hop Attempts", desc = "Give up after this many hops • 1 - 40",
+        tip = "Stops the hunt so it can't loop forever.",
+        min = 1, max = 40, value = Cfg.hopMaxTries or 12, accent = Theme.Accent2,
+        onChange = function(v) Cfg.hopMaxTries = v; scheduleSave() end,
+    })
+
+    createButton(toolsPage, "Hunt Noob Server (Auto)", Theme.Green,
+        "Hops through low-pop servers, reads real account ages on arrival, and keeps re-hopping until it lands in a genuine noob lobby.",
+        function()
+            Cfg.hopBad, Cfg.hopTries = {}, 0
+            Cfg.hopVerify = true
+            scheduleSave()
+            startHop("noob")
+        end)
     createButton(toolsPage, "Join Low-Pop Server", Theme.Accent2,
-        "Looks up this game's public servers, ranks them and teleports you to the freshest low-pop lobby.",
+        "Single hop to the freshest low-pop lobby (no account-age check).",
         function() startHop("low") end)
     createButton(toolsPage, "Join Random Server", Theme.Accent,
         "Teleports you to a random other public server that isn't full.",
         function() startHop("random") end)
+    createButton(toolsPage, "Clear Sweaty Server List", Theme.Off,
+        "Forgets the servers that were marked too sweaty so they can be picked again.",
+        function()
+            Cfg.hopBad, Cfg.hopTries = {}, 0
+            scheduleSave()
+            Toast.show("Sweaty server list cleared", Theme.Accent2, 2)
+        end)
 
     createSection(toolsPage, "Server Tools")
     local function joinServer(id)
@@ -5599,7 +5534,7 @@ local function buildMain()
         BackgroundColor3 = Theme.Bg, Text = "", ClearTextOnFocus = false,
         PlaceholderText = "XXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX",
         PlaceholderColor3 = Theme.TextFaint,
-        TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 7,
+        TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5,
     }, jobIdCard)
     addCorner(jobIdBox, 8)
     addStroke(jobIdBox, Theme.Hairline, 1, 0.5)
@@ -5607,7 +5542,7 @@ local function buildMain()
     local joinIdBtn = create("TextButton", {
         AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -12, 0, 54),
         Size = UDim2.fromOffset(58, 30), BackgroundColor3 = Theme.Bg,
-        Text = "Join", TextSize = 13, AutoButtonColor = false, ZIndex = 7,
+        Text = "Join", TextSize = 13, AutoButtonColor = false, ZIndex = 5,
     }, jobIdCard)
     addCorner(joinIdBtn, 8)
     addStroke(joinIdBtn, Theme.Accent2, 1, 0.3)
@@ -5631,14 +5566,14 @@ local function buildMain()
     local sbRefresh = create("TextButton", {
         AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -12, 0, 6),
         Size = UDim2.fromOffset(86, 28), BackgroundColor3 = Theme.Bg,
-        Text = "Refresh", TextSize = 13, AutoButtonColor = false, ZIndex = 7,
+        Text = "Refresh", TextSize = 13, AutoButtonColor = false, ZIndex = 5,
     }, sbCard)
     addCorner(sbRefresh, 8)
     addStroke(sbRefresh, Theme.Accent2, 1, 0.3)
     local sbList = create("ScrollingFrame", {
         Position = UDim2.new(0, 12, 0, 40), Size = UDim2.new(1, -24, 1, -52),
         BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 3,
-        ScrollBarImageColor3 = Theme.Hairline, CanvasSize = UDim2.new(), ZIndex = 6,
+        ScrollBarImageColor3 = Theme.Hairline, CanvasSize = UDim2.new(), ZIndex = 4,
     }, sbCard)
     local sbLayout = create("UIListLayout", { Padding = UDim.new(0, 5), SortOrder = Enum.SortOrder.LayoutOrder }, sbList)
     track(sbLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
@@ -5646,7 +5581,7 @@ local function buildMain()
     end))
     local sbNote = create("TextLabel", {
         Size = UDim2.new(1, 0, 0, 24), BackgroundTransparency = 1, Text = "Press Refresh to list public servers.",
-        TextSize = 12, TextColor3 = Theme.TextDim, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 7,
+        TextSize = 12, TextColor3 = Theme.TextDim, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5,
     }, sbList)
     local function clearRows()
         for _, c in ipairs(sbList:GetChildren()) do
@@ -5691,15 +5626,17 @@ local function buildMain()
             for n = 1, math.min(#rows, 60) do
                 local sv = rows[n]
                 local here = sv.id == game.JobId
+                local bad = isBadServer(sv.id)
                 local ping = type(sv.ping) == "number" and (sv.ping .. "ms") or "--"
                 local info = string.format("%d / %d players   %s", sv.playing, sv.maxPlayers, ping)
                 if Cfg.smartHop then
                     info = string.format("fresh %.0f%%   ", hopScore(sv, Cfg.hopMax or 8) * 100) .. info
                 end
+                if bad then info = "[sweaty] " .. info end
                 local row = create("TextButton", {
                     LayoutOrder = n, Size = UDim2.new(1, -6, 0, 27), BackgroundColor3 = Theme.Bg,
                     Text = string.format("%s%s   %s", here and "* " or "", info, string.sub(sv.id, 1, 6)),
-                    TextSize = 12, AutoButtonColor = false, ZIndex = 7,
+                    TextSize = 12, AutoButtonColor = false, ZIndex = 5,
                     TextXAlignment = Enum.TextXAlignment.Left,
                     TextColor3 = here and Theme.Accent2 or Theme.Text,
                 }, sbList)
@@ -5789,7 +5726,7 @@ local function buildMain()
         local frame = create("ScrollingFrame", {
             Position = UDim2.new(0, 12, 0, y), Size = UDim2.new(1, -24, 1, -(y + 12)),
             BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 3,
-            ScrollBarImageColor3 = Theme.Hairline, CanvasSize = UDim2.new(0, 0, 0, 0), ZIndex = 6,
+            ScrollBarImageColor3 = Theme.Hairline, CanvasSize = UDim2.new(0, 0, 0, 0), ZIndex = 4,
         }, parent)
         local layout = create("UIListLayout", { Padding = UDim.new(0, 5), SortOrder = Enum.SortOrder.LayoutOrder }, frame)
         track(layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
@@ -5812,19 +5749,19 @@ local function buildMain()
     local function makeGameRow(list, order, name, info, placeId)
         local row = create("TextButton", {
             LayoutOrder = order, Size = UDim2.new(1, -6, 0, 38), BackgroundColor3 = Theme.Bg,
-            Text = "", AutoButtonColor = false, ZIndex = 7,
+            Text = "", AutoButtonColor = false, ZIndex = 5,
         }, list)
         addCorner(row, 8)
         local stroke = addStroke(row, Theme.Hairline, 1, 0.5)
         local nameLbl = create("TextLabel", {
             Position = UDim2.fromOffset(11, 0), Size = UDim2.new(1, -134, 1, 0),
             BackgroundTransparency = 1, Text = name, TextSize = 13,
-            TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 8,
+            TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 6,
         }, row)
         create("TextLabel", {
             AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -11, 0, 0), Size = UDim2.new(0, 116, 1, 0),
             BackgroundTransparency = 1, Text = info or "", TextSize = 11, TextColor3 = Theme.TextDim,
-            TextXAlignment = Enum.TextXAlignment.Right, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 8,
+            TextXAlignment = Enum.TextXAlignment.Right, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 6,
         }, row)
         row.MouseEnter:Connect(function()
             Sfx.play("hover")
@@ -5883,7 +5820,7 @@ local function buildMain()
         Position = UDim2.new(0, 14, 0, 58), Size = UDim2.new(1, -112, 0, 32),
         BackgroundColor3 = Theme.Bg, Text = "", PlaceholderText = "Game name, Place ID or link...",
         PlaceholderColor3 = Theme.TextFaint, ClearTextOnFocus = false,
-        TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 7,
+        TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5,
     }, findCard)
     addCorner(gameBox, 8)
     addStroke(gameBox, Theme.Hairline, 1, 0.5)
@@ -5891,7 +5828,7 @@ local function buildMain()
     local findBtn = create("TextButton", {
         AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -14, 0, 58),
         Size = UDim2.fromOffset(78, 32), BackgroundColor3 = Theme.Bg, Text = "Search",
-        TextSize = 13, AutoButtonColor = false, ZIndex = 7,
+        TextSize = 13, AutoButtonColor = false, ZIndex = 5,
     }, findCard)
     addCorner(findBtn, 8)
     addStroke(findBtn, Theme.Accent2, 1, 0.3)
@@ -6023,7 +5960,7 @@ local function buildMain()
         BackgroundTransparency = 1,
     }, themeCard)
     create("UIListLayout", {
-        FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 8),
+        FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 12),
         SortOrder = Enum.SortOrder.LayoutOrder, VerticalAlignment = Enum.VerticalAlignment.Center,
     }, swatchRow)
     local swatches = {}
@@ -6034,14 +5971,13 @@ local function buildMain()
             st.Thickness = sel and 3 or 2
         end
     end
-    local nThemes = #THEME_PRESETS
     for i, pr in ipairs(THEME_PRESETS) do
         local b = create("TextButton", {
-            LayoutOrder = i, Size = UDim2.fromOffset(28, 28), BackgroundColor3 = Theme.White,
-            Text = "", AutoButtonColor = false, ZIndex = 7,
+            LayoutOrder = i, Size = UDim2.fromOffset(32, 32), BackgroundColor3 = Theme.White,
+            Text = "", AutoButtonColor = false, ZIndex = 5,
         }, swatchRow)
         b:SetAttribute("NoTheme", true)
-        addCorner(b, 14)
+        addCorner(b, 16)
         create("UIGradient", { Color = ColorSequence.new(pr.c1, pr.c2), Rotation = 45 }, b)
         swatches[pr.name] = create("UIStroke", {
             Color = Theme.Hairline, Thickness = 2, ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
@@ -6083,7 +6019,7 @@ local function buildMain()
         local b = create("TextButton", {
             LayoutOrder = i, Size = UDim2.new(1 / nFonts, -8 * (nFonts - 1) / nFonts, 1, 0),
             BackgroundColor3 = Theme.Bg, Text = fp.name, TextSize = 13, Font = fp.font,
-            AutoButtonColor = false, ZIndex = 7,
+            AutoButtonColor = false, ZIndex = 5,
         }, fontRow)
         b:SetAttribute("NoFont", true)
         b:SetAttribute("NoBoost", true)
@@ -6155,6 +6091,9 @@ local function buildMain()
         pcall(function() UI.sliders.freecamSpeed.Set(60) end)
         pcall(function() UI.sliders.uiScale.Set(100) end)
         pcall(function() UI.sliders.hopMax.Set(8) end)
+        pcall(function() UI.sliders.noobMaxAge.Set(250) end)
+        pcall(function() UI.sliders.noobRatio.Set(60) end)
+        pcall(function() UI.sliders.hopMaxTries.Set(12) end)
         pcall(function() UI.sliders.renderLevel.Set(0) end)
         pcall(function() UI.sliders.fpsCap.Set(0) end)
         pcall(function() UI.sliders.animCap.Set(0) end)
@@ -6208,6 +6147,7 @@ local function buildMain()
         Rebind.refresh()
         applyTheme("Aurora")
         refreshSwatches()
+        Cfg.hopBad, Cfg.hopTries, Cfg.hopPending, Cfg.hopVerify = {}, 0, false, false
         Cfg.panelW, Cfg.panelH = PANEL_SIZE.X.Offset, PANEL_SIZE.Y.Offset
         Cfg.posX, Cfg.posY = 0, 0
         PanelSize = PANEL_SIZE
@@ -6263,7 +6203,7 @@ local function buildMain()
         Position = UDim2.new(0, 14, 0, 48), Size = UDim2.new(1, -96, 0, 30),
         BackgroundColor3 = Theme.Bg, Text = "", ClearTextOnFocus = false,
         PlaceholderText = "EK2:... or {json}", PlaceholderColor3 = Theme.TextFaint,
-        TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 7,
+        TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5,
     }, importCard)
     addCorner(importBox, 8)
     addStroke(importBox, Theme.Hairline, 1, 0.5)
@@ -6271,7 +6211,7 @@ local function buildMain()
     local importBtn = create("TextButton", {
         AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -12, 0, 48),
         Size = UDim2.fromOffset(68, 30), BackgroundColor3 = Theme.Bg,
-        Text = "Import", TextSize = 13, AutoButtonColor = false, ZIndex = 7,
+        Text = "Import", TextSize = 13, AutoButtonColor = false, ZIndex = 5,
     }, importCard)
     addCorner(importBtn, 8)
     addStroke(importBtn, Theme.Accent2, 1, 0.3)
@@ -6651,6 +6591,12 @@ local function buildMain()
             return nil
         elseif cmd == "hop" or cmd == "lowpop" then
             return function() startHop(a1 == "random" and "random" or "low") end
+        elseif cmd == "noob" or cmd == "hunt" then
+            return function()
+                Cfg.hopBad, Cfg.hopTries, Cfg.hopVerify = {}, 0, true
+                scheduleSave()
+                startHop("noob")
+            end
         elseif cmd == "rejoin" or cmd == "rj" then
             return rejoin
         elseif cmd == "jobid" then
@@ -6679,6 +6625,8 @@ local function buildMain()
             return function() UI.sliders.auraRadius.Set(tonumber(a1)) end
         elseif cmd == "coinrange" and tonumber(a1) then
             return function() UI.sliders.mm2CoinRange.Set(tonumber(a1)) end
+        elseif cmd == "noobage" and tonumber(a1) then
+            return function() UI.sliders.noobMaxAge.Set(tonumber(a1)) end
         elseif (cmd == "tp" or cmd == "wp") and tonumber(a1) then
             return function() Waypoints.go(math.floor(tonumber(a1))) end
         elseif cmd == "setwp" and tonumber(a1) then
@@ -6691,7 +6639,7 @@ local function buildMain()
             return function() setWindowVisible(false) end
         elseif cmd == "help" then
             return function()
-                Toast.show("Commands: fly god invis esp aura noclip afk fog bright fps hud aim team fov hitbox click cam jump fling box lead uname sleep smart legacy rescue roles alerts coins • theme <name> • hop [random] • rejoin • jobid • servers • games • pin • unpin • gotocam • speed N • brake N • aura N • coinrange N • aimfov N • aimrange N • micro N • tp N • setwp N • profile N", Theme.Accent, 6)
+                Toast.show("Commands: fly god invis esp aura noclip afk fog bright fps hud aim team fov hitbox click cam jump fling box lead uname sleep smart legacy rescue roles alerts coins • noob • theme <name> • hop [random] • rejoin • jobid • servers • games • pin • unpin • gotocam • speed N • brake N • aura N • coinrange N • noobage N • aimfov N • aimrange N • micro N • tp N • setwp N • profile N", Theme.Accent, 6)
             end
         end
         return nil
@@ -6786,10 +6734,16 @@ local function buildMain()
 
     Env.startLoop()
     staggerIn(tabs.Movement.page.frame)
-    Toast.show("EKANTO v2.4 loaded. " .. Cfg.keys.toggleUI .. " hides, " .. Cfg.keys.minimize
+    Toast.show("EKANTO v2.3 loaded. " .. Cfg.keys.toggleUI .. " hides, " .. Cfg.keys.minimize
         .. " minimizes, " .. Cfg.keys.fly .. " flies, " .. Cfg.keys.freecam .. " freecam, "
         .. (Cfg.keys.aimLock or "LeftAlt") .. " aims.",
         Theme.Accent2, 4.5)
+
+    -- if we just arrived from a hop, verify this lobby
+    task.spawn(function()
+        task.wait(2)
+        guard("Noob sniper", nil, resumeHopIfPending)
+    end)
 end
 
 -- ============================================================
@@ -6798,40 +6752,108 @@ end
 local gateToken = 0
 
 local function buildGateBackdrop(parent)
-    local clip = buildPremiumBackdrop(parent, { intensity = 1.6, grid = true })
+    local clip = create("Frame", {
+        Name = "Backdrop", Size = UDim2.fromScale(1, 1),
+        BackgroundColor3 = Theme.Bg, BorderSizePixel = 0,
+        ClipsDescendants = true, ZIndex = 0,
+    }, parent)
+    addCorner(clip, 16)
 
-    local rings = {}
-    for i = 1, 4 do
-        local ring = create("Frame", {
+    -- animated aurora
+    local aurora = create("Frame", {
+        Size = UDim2.fromScale(1.8, 1.8), Position = UDim2.fromScale(-0.4, -0.4),
+        BackgroundColor3 = Theme.White, BorderSizePixel = 0, ZIndex = 0,
+    }, clip)
+    aurora:SetAttribute("NoTheme", true)
+    local agrad = create("UIGradient", {
+        Color = ColorSequence.new({
+            ColorSequenceKeypoint.new(0.0, Theme.Bg),
+            ColorSequenceKeypoint.new(0.35, Theme.OnAccent),
+            ColorSequenceKeypoint.new(0.62, Theme.Bg2),
+            ColorSequenceKeypoint.new(1.0, Theme.Bg),
+        }),
+        Rotation = 0,
+    }, aurora)
+
+    -- glow orbs
+    local orbs = {}
+    for i = 1, 3 do
+        local orb = create("Frame", {
             AnchorPoint = Vector2.new(0.5, 0.5),
             Position = UDim2.fromScale(0.5, 0.5),
-            Size = UDim2.fromOffset(60 + i * 30, 60 + i * 30),
-            BackgroundTransparency = 1,
-            BorderSizePixel = 0,
-            ZIndex = 2,
+            Size = UDim2.fromOffset(140, 140),
+            BackgroundColor3 = (i % 2 == 0) and Theme.Accent or Theme.Accent2,
+            BackgroundTransparency = 0.84, BorderSizePixel = 0, ZIndex = 0,
         }, clip)
-        addCorner(ring, 999)
-        local stroke = addStroke(ring, i % 2 == 0 and Theme.Accent2 or Theme.Accent, 1.3, 0.5)
-        table.insert(rings, { frame = ring, stroke = stroke, phase = (i - 1) / 4 })
+        addCorner(orb, 999)
+        table.insert(orbs, orb)
+    end
+
+    -- moving grid
+    local grid = create("Frame", {
+        Size = UDim2.new(1, 60, 1, 60), Position = UDim2.fromOffset(-30, -30),
+        BackgroundTransparency = 1, ZIndex = 0,
+    }, clip)
+    for i = 0, 9 do
+        create("Frame", {
+            Position = UDim2.new(i / 9, 0, 0, 0), Size = UDim2.new(0, 1, 1, 0),
+            BackgroundColor3 = Theme.Accent, BackgroundTransparency = 0.9, BorderSizePixel = 0, ZIndex = 0,
+        }, grid)
+    end
+    for i = 0, 11 do
+        create("Frame", {
+            Position = UDim2.new(0, 0, i / 11, 0), Size = UDim2.new(1, 0, 0, 1),
+            BackgroundColor3 = Theme.Accent2, BackgroundTransparency = 0.9, BorderSizePixel = 0, ZIndex = 0,
+        }, grid)
+    end
+
+    -- floating particles
+    local partLayer = create("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, ZIndex = 0 }, clip)
+    local function spawnParticle()
+        if not partLayer.Parent then return end
+        local size = math.random(2, 4)
+        local p = create("Frame", {
+            AnchorPoint = Vector2.new(0.5, 0.5),
+            Position = UDim2.fromScale(math.random(), 1.08),
+            Size = UDim2.fromOffset(size, size),
+            BackgroundColor3 = (math.random() < 0.5) and Theme.Accent or Theme.Accent2,
+            BackgroundTransparency = 0.15, BorderSizePixel = 0, ZIndex = 0,
+        }, partLayer)
+        addCorner(p, 999)
+        local dur = math.random(30, 70) / 10
+        TweenService:Create(p, TweenInfo.new(dur, Enum.EasingStyle.Linear), {
+            Position = UDim2.fromScale(math.clamp(p.Position.X.Scale + (math.random(-15, 15) / 100), 0, 1), -0.08),
+            BackgroundTransparency = 1,
+        }):Play()
+        task.delay(dur, function() pcall(function() p:Destroy() end) end)
+    end
+    for _ = 1, 14 do
+        task.delay(math.random() * 40 / 10, spawnParticle)
     end
 
     local tok = gateToken
     task.spawn(function()
         local t = 0
-        while clip.Parent and Runtime.alive and gateToken == tok do
+        while parent.Parent and gateToken == tok and Runtime.alive do
             t += 0.05
             pcall(function()
-                for _, item in ipairs(rings) do
-                    local phase = (t * 0.1 + item.phase) % 1
-                    local diameter = 60 + phase * 320
-                    item.frame.Size = UDim2.fromOffset(diameter, diameter)
-                    item.stroke.Transparency = 0.15 + phase * 0.8
+                agrad.Rotation = (t * 12) % 360
+                grid.Position = UDim2.fromOffset(-30 + (t * 8) % 30, -30 + (t * 6) % 30)
+                for i, orb in ipairs(orbs) do
+                    orb.Position = UDim2.fromScale(
+                        0.5 + 0.35 * math.sin(t * (0.3 + i * 0.12) + i),
+                        0.5 + 0.35 * math.cos(t * (0.24 + i * 0.1) + i * 1.7))
                 end
             end)
             task.wait(0.05)
         end
     end)
-
+    task.spawn(function()
+        while parent.Parent and gateToken == tok and Runtime.alive do
+            spawnParticle()
+            task.wait(0.22)
+        end
+    end)
     return clip
 end
 
@@ -6857,37 +6879,14 @@ local function buildGate()
 
     buildGateBackdrop(KeyFrame)
 
-    local gateGlass = create("Frame", {
-        Size = UDim2.fromScale(1, 1),
-        BackgroundColor3 = Theme.Glass,
-        BackgroundTransparency = 0.82,
-        BorderSizePixel = 0,
-        ZIndex = 3,
-    }, KeyFrame)
-    addCorner(gateGlass, 16)
-    local gateGlassGradient = create("UIGradient", {
-        Color = ColorSequence.new(Theme.GlassLight, Theme.Glass), Rotation = 90,
-    }, gateGlass)
-    task.spawn(function()
-        local t = 0
-        while KeyFrame.Parent and gateToken == 0 and Runtime.alive do
-            t += 0.02
-            pcall(function()
-                gateGlassGradient.Rotation = 90 + math.sin(t * 0.65) * 12
-                gateGlass.BackgroundTransparency = 0.79 + math.sin(t * 0.9) * 0.025
-            end)
-            task.wait(0.05)
-        end
-    end)
-
     create("TextLabel", {
         Position = UDim2.new(0, 0, 0, 14), Size = UDim2.new(1, 0, 0, 24),
-        BackgroundTransparency = 1, Text = "EKANTO // SECURE SHELL", TextSize = 16, ZIndex = 4,
+        BackgroundTransparency = 1, Text = "EKANTO // SECURE SHELL", TextSize = 16, ZIndex = 2,
     }, KeyFrame)
     local shellSub = create("TextLabel", {
         Position = UDim2.new(0, 0, 0, 38), Size = UDim2.new(1, 0, 0, 14),
-        BackgroundTransparency = 1, Text = "v2.4  •  AURORA PRIME", TextSize = 10,
-        TextColor3 = Theme.TextFaint, ZIndex = 4,
+        BackgroundTransparency = 1, Text = "v2.3  •  PREMIUM ACCESS", TextSize = 10,
+        TextColor3 = Theme.TextFaint, ZIndex = 2,
     }, KeyFrame)
     shellSub:SetAttribute("NoBoost", true)
 
@@ -6895,17 +6894,17 @@ local function buildGate()
         Position = UDim2.new(0, 14, 0, -2),
         Size = UDim2.new(1, -28, 0, 2),
         BackgroundColor3 = Theme.Accent, BackgroundTransparency = 0.5,
-        BorderSizePixel = 0, ZIndex = 5,
+        BorderSizePixel = 0, ZIndex = 3,
     }, KeyFrame)
     addCorner(scanline, 1)
 
     local bootHolder = create("Frame", {
         Position = UDim2.new(0, 26, 0, 62),
         Size = UDim2.new(1, -52, 0, 58),
-        BackgroundTransparency = 1, ZIndex = 4,
+        BackgroundTransparency = 1, ZIndex = 2,
     }, KeyFrame)
     local bootLines = {
-        "> EKANTO SECURE SHELL V2.4",
+        "> EKANTO SECURE SHELL V2.3",
         "> SWEPT COLLISION MODULE ... OK",
         "> AUTH REQUIRED // AWAITING KEY",
     }
@@ -6916,14 +6915,14 @@ local function buildGate()
         Size = UDim2.new(1, -52, 0, 14),
         BackgroundTransparency = 1, Text = "",
         TextSize = 10, TextColor3 = Theme.TextFaint,
-        TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 4,
+        TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 2,
     }, KeyFrame)
 
     local inputBox = create("Frame", {
         AnchorPoint = Vector2.new(0.5, 0),
         Position = UDim2.new(0.5, 0, 0, 130),
         Size = UDim2.new(1, -52, 0, 44),
-        BackgroundColor3 = Theme.Surface, BorderSizePixel = 0, Visible = false, ZIndex = 4,
+        BackgroundColor3 = Theme.Surface, BorderSizePixel = 0, Visible = false, ZIndex = 2,
     }, KeyFrame)
     addCorner(inputBox, 10)
     local inputStroke = addStroke(inputBox, Theme.Hairline, 1, 0.3)
@@ -6931,13 +6930,13 @@ local function buildGate()
         Size = UDim2.new(1, -60, 1, 0), Position = UDim2.fromOffset(14, 0),
         BackgroundTransparency = 1, Text = "",
         TextSize = 20, TextColor3 = Theme.Accent2,
-        TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5,
+        TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 3,
     }, inputBox)
     create("TextLabel", {
         AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -12, 0.5, 0),
         Size = UDim2.fromOffset(44, 16), BackgroundTransparency = 1,
         Text = "KEY", TextSize = 10, TextColor3 = Theme.TextFaint,
-        TextXAlignment = Enum.TextXAlignment.Right, ZIndex = 5,
+        TextXAlignment = Enum.TextXAlignment.Right, ZIndex = 3,
     }, inputBox)
 
     local hintLabel = create("TextLabel", {
@@ -6945,32 +6944,20 @@ local function buildGate()
         BackgroundTransparency = 1,
         Text = "keyboard or tap the keypad below",
         TextSize = 10, TextColor3 = Theme.TextFaint,
-        Visible = false, ZIndex = 4,
+        Visible = false, ZIndex = 2,
     }, KeyFrame)
     local statusLabel = create("TextLabel", {
         Position = UDim2.new(0, 0, 0, 196), Size = UDim2.new(1, 0, 0, 16),
         BackgroundTransparency = 1, Text = "",
-        TextSize = 13, TextColor3 = Theme.Accent, ZIndex = 4,
+        TextSize = 13, TextColor3 = Theme.Accent, ZIndex = 2,
     }, KeyFrame)
 
     local keypad = create("Frame", {
         AnchorPoint = Vector2.new(0.5, 0),
         Position = UDim2.new(0.5, 0, 0, 222),
         Size = UDim2.new(1, -52, 0, 154),
-        BackgroundTransparency = 1, Visible = false, Active = true, ZIndex = 4,
+        BackgroundTransparency = 1, Visible = false, ZIndex = 2,
     }, KeyFrame)
-    local keypadSurface = create("Frame", {
-        AnchorPoint = Vector2.new(0.5, 0),
-        Position = UDim2.new(0.5, 0, 0, 216),
-        Size = UDim2.new(1, -40, 0, 170),
-        BackgroundColor3 = Theme.Inset, BackgroundTransparency = 0.18,
-        BorderSizePixel = 0, Visible = false, ZIndex = 3,
-    }, KeyFrame)
-    addCorner(keypadSurface, 13)
-    addStroke(keypadSurface, Theme.Hairline, 1, 0.45)
-    create("UIGradient", {
-        Color = ColorSequence.new(Theme.Inset, Theme.GlassLight), Rotation = 25,
-    }, keypadSurface)
     create("UIGridLayout", {
         CellSize = UDim2.new(1 / 3, -6, 0, 33),
         CellPadding = UDim2.fromOffset(7, 6),
@@ -6983,7 +6970,7 @@ local function buildGate()
         Position = UDim2.new(0.5, 0, 0, 386),
         Size = UDim2.new(1, -52, 0, 40),
         BackgroundColor3 = Theme.Surface, Text = "VERIFY",
-        TextSize = 16, AutoButtonColor = false, BorderSizePixel = 0, Visible = false, ZIndex = 4,
+        TextSize = 16, AutoButtonColor = false, BorderSizePixel = 0, Visible = false, ZIndex = 2,
     }, KeyFrame)
     addCorner(verifyBtn, 10)
     local vStroke = addStroke(verifyBtn, Theme.Accent, 1.2, 0)
@@ -6997,39 +6984,24 @@ local function buildGate()
     end))
 
     local padKeys = { "1","2","3","4","5","6","7","8","9","CLR","0","DEL" }
-    local pushChar, backspace, clearAll
     for i, label in ipairs(padKeys) do
         local b = create("TextButton", {
             LayoutOrder = i, Text = label, TextSize = 15,
             BackgroundColor3 = Theme.Surface, AutoButtonColor = false, BorderSizePixel = 0,
-            TextColor3 = (label == "CLR" or label == "DEL") and Theme.Accent2 or Theme.Text,
-            Active = true, Selectable = true, ZIndex = 5,
+            TextColor3 = (label == "CLR" or label == "DEL") and Theme.Accent2 or Theme.Text, ZIndex = 3,
         }, keypad)
         addCorner(b, 9)
-        local padStroke = addStroke(b, Theme.Hairline, 1, 0.6)
-        create("UIGradient", {
-            Color = ColorSequence.new(Theme.Surface2, Theme.Surface), Rotation = 90,
-        }, b)
+        addStroke(b, Theme.Hairline, 1, 0.6)
         track(b.MouseEnter:Connect(function()
             TweenService:Create(b, HOVER_INFO, { BackgroundColor3 = Theme.Surface2 }):Play()
         end))
         track(b.MouseLeave:Connect(function()
             TweenService:Create(b, HOVER_INFO, { BackgroundColor3 = Theme.Surface }):Play()
         end))
-        track(b.InputBegan:Connect(function(input)
-            if input.UserInputType ~= Enum.UserInputType.MouseButton1
-                and input.UserInputType ~= Enum.UserInputType.Touch then return end
-            TweenService:Create(b, TweenInfo.new(0.08), { BackgroundColor3 = Theme.Elevated }):Play()
-            TweenService:Create(padStroke, TweenInfo.new(0.08), { Color = Theme.Accent2, Transparency = 0.05 }):Play()
+        track(b.MouseButton1Click:Connect(function()
             if label == "CLR" then clearAll()
             elseif label == "DEL" then backspace()
             else pushChar(label) end
-        end))
-        track(b.InputEnded:Connect(function(input)
-            if input.UserInputType ~= Enum.UserInputType.MouseButton1
-                and input.UserInputType ~= Enum.UserInputType.Touch then return end
-            TweenService:Create(b, TweenInfo.new(0.16), { BackgroundColor3 = Theme.Surface }):Play()
-            TweenService:Create(padStroke, TweenInfo.new(0.16), { Color = Theme.Hairline, Transparency = 0.6 }):Play()
         end))
     end
 
@@ -7044,24 +7016,25 @@ local function buildGate()
     end
     renderInput(true)
 
-    pushChar = function(c)
+    local function pushChar(c)
         if not inputReady or busy then return end
         if #buffer < MAX_LEN then
             buffer = buffer .. c
             renderInput(true)
         end
     end
-    backspace = function()
+    local function backspace()
         if not inputReady or busy then return end
         buffer = string.sub(buffer, 1, -2)
         renderInput(true)
     end
-    clearAll = function()
+    local function clearAll()
         if not inputReady or busy then return end
         buffer = ""
         renderInput(true)
     end
 
+    -- animated glow border pulse
     task.spawn(function()
         local tok = gateToken
         local on = true
@@ -7115,7 +7088,7 @@ local function buildGate()
                 Position = UDim2.new(0, 0, 0, (i - 1) * 19),
                 Size = UDim2.new(1, 0, 0, 16),
                 BackgroundTransparency = 1, Text = "",
-                TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5,
+                TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 3,
                 TextColor3 = (i == #bootLines) and Theme.Accent2 or Theme.TextDim,
             }, bootHolder)
             for j = 1, #line do
@@ -7131,7 +7104,6 @@ local function buildGate()
             hintLabel.Visible = true
             verifyBtn.Visible = true
             keypad.Visible = true
-            keypadSurface.Visible = true
             statusLabel.Text = "AWAITING KEY..."
         end
     end)
@@ -7328,3 +7300,5 @@ do
         buildGate()
     end
 end
+
+key gad problem key pad kaj kore na fix kore full file dew
