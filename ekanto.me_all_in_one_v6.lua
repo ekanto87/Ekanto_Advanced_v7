@@ -7306,5 +7306,3 @@ do
         buildGate()
     end
 end
-
-key gad problem key pad kaj kore na fix kore full file dew
