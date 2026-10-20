@@ -1,8 +1,8 @@
 --[[
-    EKANTO V2.3 "AURORA"  —  PREMIUM UI BUILD + MOVEMENT HARDENING
+    EKANTO V2.4 "AURORA PRIME"  —  PREMIUM UI BUILD + MOVEMENT HARDENING
     + ADVANCED COMBAT (team check, fov circle, hitbox, prediction)
     + FREECAM / AUTOCLICK / PLAYER LIST / WORLD CONTROLS
-    + GATE PREMIUM ANIMATED BACKDROP
+    + PREMIUM ANIMATED AURORA BACKDROP (main panel + key gate)
     + GAME MODES TAB (MM2 role radar + coin farmer)
     + freecam: mouse lock fixed, body frozen, shift hides bottom strip
     + fly: E/Q/Shift vertical removed (Space = up only)
@@ -68,6 +68,18 @@ local Theme = {
     Font = Enum.Font.GothamMedium,
 }
 
+-- Premium upgrade: richer palette + glassmorphism tokens
+Theme.Glass      = Color3.fromRGB(28, 30, 42)
+Theme.GlassLight = Color3.fromRGB(42, 45, 62)
+Theme.GlowSoft   = Color3.fromRGB(120, 90, 255)
+Theme.GlowCyan   = Color3.fromRGB(0, 200, 255)
+Theme.Elevated   = Color3.fromRGB(38, 40, 54)
+Theme.Inset      = Color3.fromRGB(18, 19, 26)
+
+local BG_GRADIENT_SPEED = 18
+local ORB_COUNT = 4
+local PARTICLE_RATE = 0.18
+
 local THEME_PRESETS = {
     { name = "Aurora",  c1 = Color3.fromRGB(140, 110, 255), c2 = Color3.fromRGB(0, 216, 255),  dark = Color3.fromRGB(40, 28, 78) },
     { name = "Sunset",  c1 = Color3.fromRGB(255, 120, 90),  c2 = Color3.fromRGB(255, 84, 168), dark = Color3.fromRGB(74, 28, 34) },
@@ -75,6 +87,8 @@ local THEME_PRESETS = {
     { name = "Royal",   c1 = Color3.fromRGB(122, 116, 255), c2 = Color3.fromRGB(224, 92, 255), dark = Color3.fromRGB(38, 26, 84) },
     { name = "Gold",    c1 = Color3.fromRGB(255, 190, 74),  c2 = Color3.fromRGB(255, 140, 66), dark = Color3.fromRGB(74, 50, 14) },
     { name = "Mono",    c1 = Color3.fromRGB(230, 232, 242), c2 = Color3.fromRGB(150, 162, 205), dark = Color3.fromRGB(46, 48, 60) },
+    { name = "Cyber",   c1 = Color3.fromRGB(0, 255, 200),   c2 = Color3.fromRGB(255, 0, 180),   dark = Color3.fromRGB(12, 46, 46) },
+    { name = "Crimson", c1 = Color3.fromRGB(255, 60, 90),   c2 = Color3.fromRGB(255, 160, 60),  dark = Color3.fromRGB(60, 18, 24) },
 }
 Theme.OnDark = THEME_PRESETS[1].dark
 
@@ -1251,7 +1265,6 @@ function Fly.step(hrp, hum, dt)
         if UserInputService:IsKeyDown(Enum.KeyCode.S) then dir -= look end
         if UserInputService:IsKeyDown(Enum.KeyCode.D) then dir += right end
         if UserInputService:IsKeyDown(Enum.KeyCode.A) then dir -= right end
-        -- vertical: ONLY Space (E/Q/Shift removed)
         if UserInputService:IsKeyDown(Enum.KeyCode.Space) then dir += up end
         if dir.Magnitude > 0.01 then target = dir.Unit * Cfg.flySpeed end
     end
@@ -1342,7 +1355,6 @@ function Freecam.hideHud()
     Freecam.hud, Freecam.hudLabel = nil, nil
 end
 
--- body freeze: no walking, no jumping while the camera is detached
 function Freecam.freeze(hum)
     if not hum then return end
     if Freecam.savedWalk == nil then
@@ -1382,8 +1394,6 @@ function Freecam.enable()
     local _, hum = getCharacterParts()
     Freecam.freeze(hum)
 
-    -- hard mouse lock: the default camera module keeps resetting MouseBehavior back to
-    -- Default, so we force it again on every change instead of only once
     pcall(function() UserInputService.MouseBehavior = Enum.MouseBehavior.LockCenter end)
     if Freecam.mouseConn then pcall(function() Freecam.mouseConn:Disconnect() end) end
     Freecam.mouseConn = UserInputService:GetPropertyChangedSignal("MouseBehavior"):Connect(function()
@@ -1394,7 +1404,6 @@ function Freecam.enable()
 
     Freecam.ensureHud()
     pcall(function() RunService:UnbindFromRenderStep(FREECAM_BIND) end)
-    -- bind AFTER the game camera (Camera.Value + 2) so our CFrame + mouse lock win
     RunService:BindToRenderStep(FREECAM_BIND, Enum.RenderPriority.Camera.Value + 2, function(dt)
         pcall(Freecam.step, dt)
     end)
@@ -1434,7 +1443,6 @@ function Freecam.step(dt)
     Freecam.pos += move
     cam.CFrame = CFrame.new(Freecam.pos) * rot
 
-    -- SHIFT চাপা থাকলে নিচের নাম/বারটা remove হয়ে যাবে
     if Freecam.hud then
         local want = not shiftDown
         if Freecam.hud.Visible ~= want then Freecam.hud.Visible = want end
@@ -1915,7 +1923,6 @@ function ESP.update()
                 if t.boxStroke.Color ~= col then t.boxStroke.Color = col end
             end
 
-            -- box esp
             if Cfg.espBox and visible and t.box then
                 local head = char:FindFirstChild("Head")
                 local topPos = head and head.Position or (root.Position + Vector3.new(0, 2, 0))
@@ -3232,6 +3239,170 @@ end
 -- ============================================================
 -- 8. UI FRAMEWORK
 -- ============================================================
+
+-- ---------- PREMIUM ANIMATED BACKGROUND (shared by panel + gate) ----------
+local function buildPremiumBackdrop(parent, opts)
+    opts = opts or {}
+    local intensity = opts.intensity or 1
+    local showGrid  = opts.grid ~= false
+
+    local clip = create("Frame", {
+        Name = "PremiumBackdrop",
+        Size = UDim2.fromScale(1, 1),
+        BackgroundColor3 = Theme.Bg,
+        BorderSizePixel = 0,
+        ClipsDescendants = true,
+        ZIndex = 0,
+    }, parent)
+    addCorner(clip, PANEL_RADIUS)
+
+    local aurora = create("Frame", {
+        Size = UDim2.fromScale(1.6, 1.6),
+        Position = UDim2.fromScale(-0.3, -0.3),
+        BackgroundColor3 = Theme.White,
+        BorderSizePixel = 0,
+        ZIndex = 0,
+    }, clip)
+    aurora:SetAttribute("NoTheme", true)
+    local agrad = create("UIGradient", {
+        Color = ColorSequence.new({
+            ColorSequenceKeypoint.new(0.0, Theme.Bg),
+            ColorSequenceKeypoint.new(0.3, Theme.OnAccent),
+            ColorSequenceKeypoint.new(0.55, Theme.Accent),
+            ColorSequenceKeypoint.new(0.8, Theme.Bg2),
+            ColorSequenceKeypoint.new(1.0, Theme.Bg),
+        }),
+        Rotation = 0,
+    }, aurora)
+
+    local orbs = {}
+    for i = 1, ORB_COUNT do
+        local size = 180 + i * 40
+        local orb = create("Frame", {
+            AnchorPoint = Vector2.new(0.5, 0.5),
+            Position = UDim2.fromScale(0.3 + 0.1 * i, 0.3 + 0.1 * i),
+            Size = UDim2.fromOffset(size, size),
+            BackgroundColor3 = (i % 2 == 0) and Theme.Accent2 or Theme.Accent,
+            BackgroundTransparency = 0.9 - (i * 0.02),
+            BorderSizePixel = 0,
+            ZIndex = 0,
+        }, clip)
+        addCorner(orb, 999)
+        table.insert(orbs, { frame = orb, phase = i * 1.7, speed = 0.2 + i * 0.05 })
+    end
+
+    local grid = nil
+    if showGrid then
+        grid = create("Frame", {
+            Size = UDim2.new(1, 40, 1, 40),
+            Position = UDim2.fromOffset(-20, -20),
+            BackgroundTransparency = 1,
+            ZIndex = 1,
+        }, clip)
+        for i = 0, 12 do
+            create("Frame", {
+                Position = UDim2.new(i / 12, 0, 0, 0),
+                Size = UDim2.new(0, 1, 1, 0),
+                BackgroundColor3 = Theme.Accent,
+                BackgroundTransparency = 0.94,
+                BorderSizePixel = 0,
+                ZIndex = 1,
+            }, grid)
+        end
+        for i = 0, 14 do
+            create("Frame", {
+                Position = UDim2.new(0, 0, i / 14, 0),
+                Size = UDim2.new(1, 0, 0, 1),
+                BackgroundColor3 = Theme.Accent2,
+                BackgroundTransparency = 0.94,
+                BorderSizePixel = 0,
+                ZIndex = 1,
+            }, grid)
+        end
+    end
+
+    local veil = create("Frame", {
+        Size = UDim2.fromScale(1, 1),
+        BackgroundColor3 = Theme.Black,
+        BackgroundTransparency = 0.55,
+        BorderSizePixel = 0,
+        ZIndex = 2,
+    }, clip)
+    veil:SetAttribute("NoTheme", true)
+    create("UIGradient", {
+        Color = ColorSequence.new(Color3.new(0, 0, 0)),
+        Transparency = NumberSequence.new({
+            NumberSequenceKeypoint.new(0, 0.85),
+            NumberSequenceKeypoint.new(0.5, 0.35),
+            NumberSequenceKeypoint.new(1, 0.85),
+        }),
+        Rotation = 90,
+    }, veil)
+
+    local particleLayer = create("Frame", {
+        Size = UDim2.fromScale(1, 1),
+        BackgroundTransparency = 1,
+        ZIndex = 3,
+    }, clip)
+
+    local function spawnSpark()
+        if not particleLayer.Parent then return end
+        local sz = math.random(2, 4)
+        local p = create("Frame", {
+            AnchorPoint = Vector2.new(0.5, 0.5),
+            Position = UDim2.fromScale(math.random(), 1.1),
+            Size = UDim2.fromOffset(sz, sz),
+            BackgroundColor3 = (math.random() < 0.5) and Theme.Accent2 or Theme.White,
+            BackgroundTransparency = 0.1,
+            BorderSizePixel = 0,
+            ZIndex = 3,
+        }, particleLayer)
+        addCorner(p, 999)
+        local dur = math.random(40, 80) / 10
+        TweenService:Create(p, TweenInfo.new(dur, Enum.EasingStyle.Linear), {
+            Position = UDim2.fromScale(
+                math.clamp(p.Position.X.Scale + (math.random(-20, 20) / 100), 0, 1),
+                -0.1
+            ),
+            BackgroundTransparency = 1,
+        }):Play()
+        task.delay(dur, function() pcall(function() p:Destroy() end) end)
+    end
+
+    local tok = gateToken
+    task.spawn(function()
+        local t = 0
+        while clip.Parent and Runtime.alive and gateToken == tok do
+            t += 0.05
+            pcall(function()
+                agrad.Rotation = (t * BG_GRADIENT_SPEED * intensity) % 360
+                if grid then
+                    grid.Position = UDim2.fromOffset(
+                        -20 + (t * 6) % 20,
+                        -20 + (t * 5) % 20
+                    )
+                end
+                for _, o in ipairs(orbs) do
+                    o.frame.Position = UDim2.fromScale(
+                        0.5 + 0.35 * math.sin(t * o.speed + o.phase),
+                        0.5 + 0.35 * math.cos(t * (o.speed * 0.8) + o.phase * 1.3)
+                    )
+                end
+            end)
+            task.wait(0.05)
+        end
+    end)
+
+    task.spawn(function()
+        while clip.Parent and Runtime.alive and gateToken == tok do
+            spawnSpark()
+            task.wait(PARTICLE_RATE)
+        end
+    end)
+
+    return clip
+end
+
 local function staggerIn(holder)
     local items = {}
     for _, c in ipairs(holder:GetChildren()) do
@@ -3480,10 +3651,28 @@ local function createCard(page, name, height, accent)
         LayoutOrder = page.order,
         Size = UDim2.new(1, -10, 0, height),
         BackgroundColor3 = Theme.Surface,
+        BackgroundTransparency = 0.05,
         BorderSizePixel = 0,
     }, page.frame)
     addCorner(card, 11)
     local stroke = addStroke(card, Theme.Hairline, 1, 0.55)
+
+    local glow = create("Frame", {
+        Size = UDim2.fromScale(1, 1),
+        BackgroundColor3 = accent or Theme.Accent,
+        BackgroundTransparency = 1,
+        BorderSizePixel = 0,
+        ZIndex = 0,
+    }, card)
+    addCorner(glow, 11)
+
+    track(card.MouseEnter:Connect(function()
+        TweenService:Create(glow, HOVER_INFO, { BackgroundTransparency = 0.92 }):Play()
+    end))
+    track(card.MouseLeave:Connect(function()
+        TweenService:Create(glow, HOVER_INFO, { BackgroundTransparency = 1 }):Play()
+    end))
+
     track(card.InputBegan:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton2 and CardContext.open then
             guard("Context menu", nil, CardContext.open, card)
@@ -3812,47 +4001,56 @@ local function buildMain()
 
     local shadowParts = addPanelShadow(Main)
 
+    -- ===== PREMIUM ANIMATED BACKGROUND =====
+    local backdrop = buildPremiumBackdrop(Main, { intensity = 1.2, grid = true })
+    backdrop.ZIndex = 2
+    backdrop.Size = UDim2.fromScale(1, 1)
+
     local bgFill = create("Frame", {
-        Name = "BgFill", Size = UDim2.fromScale(1, 1),
-        BackgroundColor3 = Theme.Bg, BorderSizePixel = 0, ZIndex = 2,
+        Name = "GlassOverlay",
+        Size = UDim2.fromScale(1, 1),
+        BackgroundColor3 = Theme.Glass,
+        BackgroundTransparency = 0.78,
+        BorderSizePixel = 0,
+        ZIndex = 3,
     }, Main)
     addCorner(bgFill, PANEL_RADIUS)
-    local mainGrad = create("UIGradient", {
-        Color = ColorSequence.new(Theme.Bg2, Theme.Bg), Rotation = 90,
-    }, bgFill)
+
     local sheen = create("Frame", {
-        Size = UDim2.new(1.6, 0, 1.6, 0), Position = UDim2.fromScale(-0.3, -0.3),
-        BackgroundColor3 = Theme.White, BackgroundTransparency = 0.94,
-        BorderSizePixel = 0, ZIndex = 2,
+        Size = UDim2.new(1, 0, 0.35, 0),
+        Position = UDim2.fromScale(0, 0),
+        BackgroundColor3 = Theme.White,
+        BackgroundTransparency = 0.96,
+        BorderSizePixel = 0,
+        ZIndex = 3,
     }, bgFill)
-    create("UIGradient", {
-        Color = ColorSequence.new(Theme.Accent, Theme.Accent2),
+    addCorner(sheen, PANEL_RADIUS)
+    local sheenGradient = create("UIGradient", {
+        Color = ColorSequence.new(Theme.White, Theme.White),
         Transparency = NumberSequence.new({
-            NumberSequenceKeypoint.new(0, 1),
-            NumberSequenceKeypoint.new(0.46, 1),
-            NumberSequenceKeypoint.new(0.5, 0.76),
-            NumberSequenceKeypoint.new(0.54, 1),
+            NumberSequenceKeypoint.new(0, 0.9),
             NumberSequenceKeypoint.new(1, 1),
         }),
-        Rotation = 25,
+        Rotation = 90,
     }, sheen)
     task.spawn(function()
         local t = 0
         while Main and Main.Parent and Runtime.alive do
             t += 0.018
             pcall(function()
-                mainGrad.Rotation = 90 + math.sin(t * 0.7) * 10
-                sheen.Position = UDim2.fromScale(-0.3 + (t % 2.2) / 2.2, -0.3)
+                sheen.Position = UDim2.fromScale(-0.15 + (t % 2.3) / 2.3, -0.05)
+                sheenGradient.Rotation = 70 + math.sin(t * 0.8) * 18
             end)
             task.wait(0.05)
         end
     end)
-    local bgStroke = addStroke(bgFill, Theme.Hairline, 1, 0.4)
-    local bgBorder = addGradientBorder(bgFill, 1.2)
+
+    local bgStroke = addStroke(bgFill, Theme.Hairline, 1, 0.35)
+    local bgBorder = addGradientBorder(bgFill, 1.4)
 
     local body = create("CanvasGroup", {
         Name = "Panel", Size = UDim2.fromScale(1, 1),
-        BackgroundTransparency = 1, BorderSizePixel = 0, ZIndex = 3,
+        BackgroundTransparency = 1, BorderSizePixel = 0, ZIndex = 4,
         GroupTransparency = 0,
     }, Main)
 
@@ -3867,39 +4065,41 @@ local function buildMain()
         Name = "Sidebar",
         Position = UDim2.new(0, 10, 0, 10),
         Size = UDim2.new(0, SIDEBAR_W, 1, -20),
-        BackgroundColor3 = Theme.Bg2, BackgroundTransparency = 0.35,
-        BorderSizePixel = 0, ZIndex = 3,
+        BackgroundColor3 = Theme.GlassLight,
+        BackgroundTransparency = 0.55,
+        BorderSizePixel = 0,
+        ZIndex = 5,
     }, body)
     addCorner(sidebar, 12)
-    addStroke(sidebar, Theme.Hairline, 1, 0.55)
+    addStroke(sidebar, Theme.Accent, 1, 0.7)
 
     local logo = create("Frame", {
-        Size = UDim2.new(1, 0, 0, 64), BackgroundTransparency = 1, ZIndex = 4,
+        Size = UDim2.new(1, 0, 0, 64), BackgroundTransparency = 1, ZIndex = 6,
     }, sidebar)
     local logoText = create("TextLabel", {
         Position = UDim2.fromOffset(16, 14), Size = UDim2.new(1, -32, 0, 22),
         BackgroundTransparency = 1, Text = "EKANTO", TextSize = 20,
-        TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5,
+        TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 7,
     }, logo)
     logoText:SetAttribute("NoBoost", true)
     create("UIGradient", { Color = ColorSequence.new(Theme.Accent, Theme.Accent2), Rotation = 0 }, logoText)
     local verLabel = create("TextLabel", {
         Position = UDim2.fromOffset(16, 36), Size = UDim2.new(1, -32, 0, 14),
-        BackgroundTransparency = 1, Text = "v2.3  •  PRO", TextSize = 10,
-        TextColor3 = Theme.TextFaint, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5,
+        BackgroundTransparency = 1, Text = "v2.4  •  PRIME", TextSize = 10,
+        TextColor3 = Theme.TextFaint, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 7,
     }, logo)
     verLabel:SetAttribute("NoBoost", true)
     local dot = create("Frame", {
         AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -14, 0.5, 2),
         Size = UDim2.fromOffset(8, 8), BackgroundColor3 = Theme.Green,
-        BorderSizePixel = 0, ZIndex = 5,
+        BorderSizePixel = 0, ZIndex = 7,
     }, logo)
     addCorner(dot, 4)
 
     local navList = create("ScrollingFrame", {
         Position = UDim2.new(0, 8, 0, 68),
         Size = UDim2.new(1, -16, 1, -140),
-        BackgroundTransparency = 1, BorderSizePixel = 0, ZIndex = 4,
+        BackgroundTransparency = 1, BorderSizePixel = 0, ZIndex = 6,
         ScrollBarThickness = 0, CanvasSize = UDim2.new(0, 0, 0, 0),
         AutomaticCanvasSize = Enum.AutomaticSize.Y, ScrollingDirection = Enum.ScrollingDirection.Y,
     }, sidebar)
@@ -3909,24 +4109,24 @@ local function buildMain()
         AnchorPoint = Vector2.new(0, 1), Position = UDim2.new(0, 8, 1, -10),
         Size = UDim2.new(1, -16, 0, 54),
         BackgroundColor3 = Theme.Surface, BackgroundTransparency = 0.15,
-        BorderSizePixel = 0, ZIndex = 5,
+        BorderSizePixel = 0, ZIndex = 7,
     }, sidebar)
     addCorner(sbFooter, 10)
     addStroke(sbFooter, Theme.Hairline, 1, 0.5)
 
     local avWrap = create("Frame", {
         Position = UDim2.fromOffset(8, 10), Size = UDim2.fromOffset(34, 34),
-        BackgroundColor3 = Theme.Bg, BorderSizePixel = 0, ZIndex = 6,
+        BackgroundColor3 = Theme.Bg, BorderSizePixel = 0, ZIndex = 8,
     }, sbFooter)
     addCorner(avWrap, 17)
     addStroke(avWrap, Theme.Accent, 1.5, 0.25)
     local avatar = create("ImageLabel", {
-        Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Image = "", ZIndex = 7,
+        Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Image = "", ZIndex = 9,
     }, avWrap)
     addCorner(avatar, 17)
     local avDot = create("Frame", {
         Position = UDim2.fromOffset(31, 33), Size = UDim2.fromOffset(9, 9),
-        BackgroundColor3 = Theme.Green, BorderSizePixel = 0, ZIndex = 9,
+        BackgroundColor3 = Theme.Green, BorderSizePixel = 0, ZIndex = 11,
     }, sbFooter)
     addCorner(avDot, 5)
     addStroke(avDot, Theme.Surface, 2, 0)
@@ -3934,14 +4134,14 @@ local function buildMain()
     local nameLbl = create("TextLabel", {
         Position = UDim2.fromOffset(50, 11), Size = UDim2.new(1, -58, 0, 14),
         BackgroundTransparency = 1, Text = LocalPlayer.DisplayName, TextSize = 12,
-        TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 7,
+        TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 9,
     }, sbFooter)
     nameLbl:SetAttribute("NoBoost", true)
     local handleLbl = create("TextLabel", {
         Position = UDim2.fromOffset(50, 27), Size = UDim2.new(1, -58, 0, 12),
         BackgroundTransparency = 1, Text = "@" .. LocalPlayer.Name, TextSize = 10,
         TextColor3 = Theme.TextFaint, TextXAlignment = Enum.TextXAlignment.Left,
-        TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 7,
+        TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 9,
     }, sbFooter)
     handleLbl:SetAttribute("NoBoost", true)
 
@@ -3958,19 +4158,19 @@ local function buildMain()
         Name = "Content",
         Position = UDim2.new(0, SIDEBAR_W + 20, 0, 0),
         Size = UDim2.new(1, -(SIDEBAR_W + 20), 1, 0),
-        BackgroundTransparency = 1, ZIndex = 3,
+        BackgroundTransparency = 1, ZIndex = 5,
     }, body)
 
     local header = create("Frame", {
         Position = UDim2.new(0, 12, 0, 12),
         Size = UDim2.new(1, -24, 0, 38),
-        BackgroundTransparency = 1, Active = true, ZIndex = 4,
+        BackgroundTransparency = 1, Active = true, ZIndex = 6,
     }, content)
 
     local pageTitle = create("TextLabel", {
         Position = UDim2.fromOffset(2, 0), Size = UDim2.new(0, 118, 1, 0),
         BackgroundTransparency = 1, Text = "Movement", TextSize = 18,
-        TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5,
+        TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 7,
     }, header)
 
     local function makeHeaderButton(name, text, xOffset, hoverColor)
@@ -3979,7 +4179,7 @@ local function buildMain()
             Position = UDim2.new(1, xOffset, 0.5, 0),
             Size = UDim2.new(0, 30, 0, 30),
             BackgroundColor3 = Theme.Surface, Text = text, TextSize = 16,
-            AutoButtonColor = false, ZIndex = 6,
+            AutoButtonColor = false, ZIndex = 8,
         }, header)
         addCorner(btn, 9)
         addStroke(btn, Theme.Hairline, 1, 0.5)
@@ -4010,7 +4210,7 @@ local function buildMain()
         AnchorPoint = Vector2.new(0, 0.5),
         BackgroundColor3 = Theme.Surface, Text = "", PlaceholderText = "Search or run a command...",
         PlaceholderColor3 = Theme.TextFaint, ClearTextOnFocus = false,
-        TextSize = 13, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 6,
+        TextSize = 13, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 8,
     }, header)
     addCorner(searchBox, 9)
     local searchStroke = addStroke(searchBox, Theme.Hairline, 1, 0.5)
@@ -4024,7 +4224,7 @@ local function buildMain()
     local clearBtn = create("TextButton", {
         AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -8, 0.5, 0),
         Size = UDim2.fromOffset(18, 18), BackgroundTransparency = 1, Text = "×",
-        TextSize = 16, TextColor3 = Theme.TextDim, Visible = false, AutoButtonColor = false, ZIndex = 8,
+        TextSize = 16, TextColor3 = Theme.TextDim, Visible = false, AutoButtonColor = false, ZIndex = 10,
     }, searchBox)
 
     makeDraggable(header, Main, nil, nil, true)
@@ -4055,20 +4255,20 @@ local function buildMain()
         local item = create("TextButton", {
             LayoutOrder = tabOrder, Size = UDim2.new(1, 0, 0, 38),
             BackgroundColor3 = Theme.Surface, BackgroundTransparency = 1,
-            Text = "", AutoButtonColor = false, ZIndex = 5,
+            Text = "", AutoButtonColor = false, ZIndex = 7,
         }, navList)
         addCorner(item, 9)
 
         local hl = create("Frame", {
             Size = UDim2.fromScale(1, 1), BackgroundColor3 = Theme.Accent,
-            BackgroundTransparency = 0.88, BorderSizePixel = 0, ZIndex = 5, Visible = false,
+            BackgroundTransparency = 0.88, BorderSizePixel = 0, ZIndex = 7, Visible = false,
         }, item)
         addCorner(hl, 9)
 
         local bar = create("Frame", {
             AnchorPoint = Vector2.new(0, 0.5), Position = UDim2.new(0, 0, 0.5, 0),
             Size = UDim2.fromOffset(3, 18), BackgroundColor3 = Theme.Accent,
-            BorderSizePixel = 0, ZIndex = 6, Visible = false,
+            BorderSizePixel = 0, ZIndex = 8, Visible = false,
         }, item)
         addCorner(bar, 2)
         addGradient(bar, Theme.Accent, Theme.Accent2, 90)
@@ -4076,7 +4276,7 @@ local function buildMain()
         local label = create("TextLabel", {
             Position = UDim2.fromOffset(17, 0), Size = UDim2.new(1, -22, 1, 0),
             BackgroundTransparency = 1, Text = name, TextSize = 14,
-            TextColor3 = Theme.TextDim, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 6,
+            TextColor3 = Theme.TextDim, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 8,
         }, item)
 
         local frame = create("ScrollingFrame", {
@@ -4086,7 +4286,7 @@ local function buildMain()
             ScrollBarThickness = 3, ScrollBarImageColor3 = Theme.Hairline,
             CanvasSize = UDim2.new(0, 0, 0, 0),
             ScrollingDirection = Enum.ScrollingDirection.Y,
-            Visible = false, ZIndex = 4,
+            Visible = false, ZIndex = 6,
         }, content)
         create("UIPadding", { PaddingLeft = UDim.new(0, 2), PaddingTop = UDim.new(0, 4), PaddingBottom = UDim.new(0, 8) }, frame)
         local layout = create("UIListLayout", {
@@ -4694,7 +4894,7 @@ local function buildMain()
         local btn = create("TextButton", {
             AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -14, 0.5, 0),
             Size = UDim2.fromOffset(130, 32), BackgroundColor3 = Theme.Bg,
-            Text = "", TextSize = 13, AutoButtonColor = false, ZIndex = 5,
+            Text = "", TextSize = 13, AutoButtonColor = false, ZIndex = 7,
         }, card)
         addCorner(btn, 9)
         local bStroke = addStroke(btn, Theme.Hairline, 1, 0.5)
@@ -4764,7 +4964,7 @@ local function buildMain()
             local b = create("TextButton", {
                 AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, xOff, 0.5, 0),
                 Size = UDim2.fromOffset(68, 30), BackgroundColor3 = Theme.Bg,
-                Text = text, TextSize = 13, AutoButtonColor = false, ZIndex = 5,
+                Text = text, TextSize = 13, AutoButtonColor = false, ZIndex = 7,
             }, card)
             addCorner(b, 8)
             addStroke(b, color, 1, 0.35)
@@ -4960,7 +5160,7 @@ local function buildMain()
     local plList = create("ScrollingFrame", {
         Position = UDim2.new(0, 12, 0, 58), Size = UDim2.new(1, -24, 1, -70),
         BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 3,
-        ScrollBarImageColor3 = Theme.Hairline, CanvasSize = UDim2.new(), ZIndex = 4,
+        ScrollBarImageColor3 = Theme.Hairline, CanvasSize = UDim2.new(), ZIndex = 6,
     }, plCard)
     local plLayout = create("UIListLayout", { Padding = UDim.new(0, 5), SortOrder = Enum.SortOrder.LayoutOrder }, plList)
     track(plLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
@@ -5022,7 +5222,7 @@ local function buildMain()
             local dist = (myHrp and hrp) and math.floor((hrp.Position - myHrp.Position).Magnitude) or 0
             local row = create("TextButton", {
                 LayoutOrder = i, Size = UDim2.new(1, -6, 0, 30), BackgroundColor3 = Theme.Bg,
-                Text = "", AutoButtonColor = false, ZIndex = 5,
+                Text = "", AutoButtonColor = false, ZIndex = 7,
             }, plList)
             addCorner(row, 7)
             local friendly = Cfg.teamCheck and LocalPlayer.Team and plr.Team and LocalPlayer.Team == plr.Team
@@ -5032,13 +5232,13 @@ local function buildMain()
                 Position = UDim2.fromOffset(9, 0), Size = UDim2.new(1, -150, 1, 0),
                 BackgroundTransparency = 1, Text = plr.DisplayName .. "  (" .. dist .. "m)" .. tag,
                 TextSize = 12, TextColor3 = friendly and Theme.Green or Theme.Text,
-                TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 6,
+                TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 8,
             }, row)
             local function rowBtn(text, xOff, color, fn)
                 local b = create("TextButton", {
                     AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, xOff, 0.5, 0),
                     Size = UDim2.fromOffset(52, 22), BackgroundColor3 = Theme.Surface,
-                    Text = text, TextSize = 11, AutoButtonColor = false, ZIndex = 6,
+                    Text = text, TextSize = 11, AutoButtonColor = false, ZIndex = 8,
                 }, row)
                 addCorner(b, 6)
                 addStroke(b, color, 1, 0.4)
@@ -5133,7 +5333,7 @@ local function buildMain()
             local b = create("TextButton", {
                 AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, xOff, 0.5, 0),
                 Size = UDim2.fromOffset(48, 30), BackgroundColor3 = Theme.Bg,
-                Text = text, TextSize = 13, AutoButtonColor = false, ZIndex = 5,
+                Text = text, TextSize = 13, AutoButtonColor = false, ZIndex = 7,
             }, card)
             b:SetAttribute("NoBoost", true)
             addCorner(b, 8)
@@ -5399,7 +5599,7 @@ local function buildMain()
         BackgroundColor3 = Theme.Bg, Text = "", ClearTextOnFocus = false,
         PlaceholderText = "XXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX",
         PlaceholderColor3 = Theme.TextFaint,
-        TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5,
+        TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 7,
     }, jobIdCard)
     addCorner(jobIdBox, 8)
     addStroke(jobIdBox, Theme.Hairline, 1, 0.5)
@@ -5407,7 +5607,7 @@ local function buildMain()
     local joinIdBtn = create("TextButton", {
         AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -12, 0, 54),
         Size = UDim2.fromOffset(58, 30), BackgroundColor3 = Theme.Bg,
-        Text = "Join", TextSize = 13, AutoButtonColor = false, ZIndex = 5,
+        Text = "Join", TextSize = 13, AutoButtonColor = false, ZIndex = 7,
     }, jobIdCard)
     addCorner(joinIdBtn, 8)
     addStroke(joinIdBtn, Theme.Accent2, 1, 0.3)
@@ -5431,14 +5631,14 @@ local function buildMain()
     local sbRefresh = create("TextButton", {
         AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -12, 0, 6),
         Size = UDim2.fromOffset(86, 28), BackgroundColor3 = Theme.Bg,
-        Text = "Refresh", TextSize = 13, AutoButtonColor = false, ZIndex = 5,
+        Text = "Refresh", TextSize = 13, AutoButtonColor = false, ZIndex = 7,
     }, sbCard)
     addCorner(sbRefresh, 8)
     addStroke(sbRefresh, Theme.Accent2, 1, 0.3)
     local sbList = create("ScrollingFrame", {
         Position = UDim2.new(0, 12, 0, 40), Size = UDim2.new(1, -24, 1, -52),
         BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 3,
-        ScrollBarImageColor3 = Theme.Hairline, CanvasSize = UDim2.new(), ZIndex = 4,
+        ScrollBarImageColor3 = Theme.Hairline, CanvasSize = UDim2.new(), ZIndex = 6,
     }, sbCard)
     local sbLayout = create("UIListLayout", { Padding = UDim.new(0, 5), SortOrder = Enum.SortOrder.LayoutOrder }, sbList)
     track(sbLayout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
@@ -5446,7 +5646,7 @@ local function buildMain()
     end))
     local sbNote = create("TextLabel", {
         Size = UDim2.new(1, 0, 0, 24), BackgroundTransparency = 1, Text = "Press Refresh to list public servers.",
-        TextSize = 12, TextColor3 = Theme.TextDim, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5,
+        TextSize = 12, TextColor3 = Theme.TextDim, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 7,
     }, sbList)
     local function clearRows()
         for _, c in ipairs(sbList:GetChildren()) do
@@ -5499,7 +5699,7 @@ local function buildMain()
                 local row = create("TextButton", {
                     LayoutOrder = n, Size = UDim2.new(1, -6, 0, 27), BackgroundColor3 = Theme.Bg,
                     Text = string.format("%s%s   %s", here and "* " or "", info, string.sub(sv.id, 1, 6)),
-                    TextSize = 12, AutoButtonColor = false, ZIndex = 5,
+                    TextSize = 12, AutoButtonColor = false, ZIndex = 7,
                     TextXAlignment = Enum.TextXAlignment.Left,
                     TextColor3 = here and Theme.Accent2 or Theme.Text,
                 }, sbList)
@@ -5589,7 +5789,7 @@ local function buildMain()
         local frame = create("ScrollingFrame", {
             Position = UDim2.new(0, 12, 0, y), Size = UDim2.new(1, -24, 1, -(y + 12)),
             BackgroundTransparency = 1, BorderSizePixel = 0, ScrollBarThickness = 3,
-            ScrollBarImageColor3 = Theme.Hairline, CanvasSize = UDim2.new(0, 0, 0, 0), ZIndex = 4,
+            ScrollBarImageColor3 = Theme.Hairline, CanvasSize = UDim2.new(0, 0, 0, 0), ZIndex = 6,
         }, parent)
         local layout = create("UIListLayout", { Padding = UDim.new(0, 5), SortOrder = Enum.SortOrder.LayoutOrder }, frame)
         track(layout:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
@@ -5612,19 +5812,19 @@ local function buildMain()
     local function makeGameRow(list, order, name, info, placeId)
         local row = create("TextButton", {
             LayoutOrder = order, Size = UDim2.new(1, -6, 0, 38), BackgroundColor3 = Theme.Bg,
-            Text = "", AutoButtonColor = false, ZIndex = 5,
+            Text = "", AutoButtonColor = false, ZIndex = 7,
         }, list)
         addCorner(row, 8)
         local stroke = addStroke(row, Theme.Hairline, 1, 0.5)
         local nameLbl = create("TextLabel", {
             Position = UDim2.fromOffset(11, 0), Size = UDim2.new(1, -134, 1, 0),
             BackgroundTransparency = 1, Text = name, TextSize = 13,
-            TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 6,
+            TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 8,
         }, row)
         create("TextLabel", {
             AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -11, 0, 0), Size = UDim2.new(0, 116, 1, 0),
             BackgroundTransparency = 1, Text = info or "", TextSize = 11, TextColor3 = Theme.TextDim,
-            TextXAlignment = Enum.TextXAlignment.Right, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 6,
+            TextXAlignment = Enum.TextXAlignment.Right, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 8,
         }, row)
         row.MouseEnter:Connect(function()
             Sfx.play("hover")
@@ -5683,7 +5883,7 @@ local function buildMain()
         Position = UDim2.new(0, 14, 0, 58), Size = UDim2.new(1, -112, 0, 32),
         BackgroundColor3 = Theme.Bg, Text = "", PlaceholderText = "Game name, Place ID or link...",
         PlaceholderColor3 = Theme.TextFaint, ClearTextOnFocus = false,
-        TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5,
+        TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 7,
     }, findCard)
     addCorner(gameBox, 8)
     addStroke(gameBox, Theme.Hairline, 1, 0.5)
@@ -5691,7 +5891,7 @@ local function buildMain()
     local findBtn = create("TextButton", {
         AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -14, 0, 58),
         Size = UDim2.fromOffset(78, 32), BackgroundColor3 = Theme.Bg, Text = "Search",
-        TextSize = 13, AutoButtonColor = false, ZIndex = 5,
+        TextSize = 13, AutoButtonColor = false, ZIndex = 7,
     }, findCard)
     addCorner(findBtn, 8)
     addStroke(findBtn, Theme.Accent2, 1, 0.3)
@@ -5823,7 +6023,7 @@ local function buildMain()
         BackgroundTransparency = 1,
     }, themeCard)
     create("UIListLayout", {
-        FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 12),
+        FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 8),
         SortOrder = Enum.SortOrder.LayoutOrder, VerticalAlignment = Enum.VerticalAlignment.Center,
     }, swatchRow)
     local swatches = {}
@@ -5834,13 +6034,14 @@ local function buildMain()
             st.Thickness = sel and 3 or 2
         end
     end
+    local nThemes = #THEME_PRESETS
     for i, pr in ipairs(THEME_PRESETS) do
         local b = create("TextButton", {
-            LayoutOrder = i, Size = UDim2.fromOffset(32, 32), BackgroundColor3 = Theme.White,
-            Text = "", AutoButtonColor = false, ZIndex = 5,
+            LayoutOrder = i, Size = UDim2.fromOffset(28, 28), BackgroundColor3 = Theme.White,
+            Text = "", AutoButtonColor = false, ZIndex = 7,
         }, swatchRow)
         b:SetAttribute("NoTheme", true)
-        addCorner(b, 16)
+        addCorner(b, 14)
         create("UIGradient", { Color = ColorSequence.new(pr.c1, pr.c2), Rotation = 45 }, b)
         swatches[pr.name] = create("UIStroke", {
             Color = Theme.Hairline, Thickness = 2, ApplyStrokeMode = Enum.ApplyStrokeMode.Border,
@@ -5882,7 +6083,7 @@ local function buildMain()
         local b = create("TextButton", {
             LayoutOrder = i, Size = UDim2.new(1 / nFonts, -8 * (nFonts - 1) / nFonts, 1, 0),
             BackgroundColor3 = Theme.Bg, Text = fp.name, TextSize = 13, Font = fp.font,
-            AutoButtonColor = false, ZIndex = 5,
+            AutoButtonColor = false, ZIndex = 7,
         }, fontRow)
         b:SetAttribute("NoFont", true)
         b:SetAttribute("NoBoost", true)
@@ -6062,7 +6263,7 @@ local function buildMain()
         Position = UDim2.new(0, 14, 0, 48), Size = UDim2.new(1, -96, 0, 30),
         BackgroundColor3 = Theme.Bg, Text = "", ClearTextOnFocus = false,
         PlaceholderText = "EK2:... or {json}", PlaceholderColor3 = Theme.TextFaint,
-        TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5,
+        TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 7,
     }, importCard)
     addCorner(importBox, 8)
     addStroke(importBox, Theme.Hairline, 1, 0.5)
@@ -6070,7 +6271,7 @@ local function buildMain()
     local importBtn = create("TextButton", {
         AnchorPoint = Vector2.new(1, 0), Position = UDim2.new(1, -12, 0, 48),
         Size = UDim2.fromOffset(68, 30), BackgroundColor3 = Theme.Bg,
-        Text = "Import", TextSize = 13, AutoButtonColor = false, ZIndex = 5,
+        Text = "Import", TextSize = 13, AutoButtonColor = false, ZIndex = 7,
     }, importCard)
     addCorner(importBtn, 8)
     addStroke(importBtn, Theme.Accent2, 1, 0.3)
@@ -6585,7 +6786,7 @@ local function buildMain()
 
     Env.startLoop()
     staggerIn(tabs.Movement.page.frame)
-    Toast.show("EKANTO v2.3 loaded. " .. Cfg.keys.toggleUI .. " hides, " .. Cfg.keys.minimize
+    Toast.show("EKANTO v2.4 loaded. " .. Cfg.keys.toggleUI .. " hides, " .. Cfg.keys.minimize
         .. " minimizes, " .. Cfg.keys.fly .. " flies, " .. Cfg.keys.freecam .. " freecam, "
         .. (Cfg.keys.aimLock or "LeftAlt") .. " aims.",
         Theme.Accent2, 4.5)
@@ -6597,144 +6798,40 @@ end
 local gateToken = 0
 
 local function buildGateBackdrop(parent)
-    local clip = create("Frame", {
-        Name = "Backdrop", Size = UDim2.fromScale(1, 1),
-        BackgroundColor3 = Theme.Bg, BorderSizePixel = 0,
-        ClipsDescendants = true, ZIndex = 0,
-    }, parent)
-    addCorner(clip, 16)
+    local clip = buildPremiumBackdrop(parent, { intensity = 1.6, grid = true })
 
-    -- animated aurora
-    local aurora = create("Frame", {
-        Size = UDim2.fromScale(1.8, 1.8), Position = UDim2.fromScale(-0.4, -0.4),
-        BackgroundColor3 = Theme.White, BorderSizePixel = 0, ZIndex = 0,
-    }, clip)
-    aurora:SetAttribute("NoTheme", true)
-    local agrad = create("UIGradient", {
-        Color = ColorSequence.new({
-            ColorSequenceKeypoint.new(0.0, Theme.Bg),
-            ColorSequenceKeypoint.new(0.35, Theme.OnAccent),
-            ColorSequenceKeypoint.new(0.62, Theme.Bg2),
-            ColorSequenceKeypoint.new(1.0, Theme.Bg),
-        }),
-        Rotation = 0,
-    }, aurora)
-
-    -- Soft vignette keeps the animated colors focused behind the content.
-    local veil = create("Frame", {
-        Size = UDim2.fromScale(1, 1), BackgroundColor3 = Theme.Black,
-        BackgroundTransparency = 0.2, BorderSizePixel = 0, ZIndex = 1,
-    }, clip)
-    veil:SetAttribute("NoTheme", true)
-    create("UIGradient", {
-        Color = ColorSequence.new(Color3.new(0, 0, 0)),
-        Transparency = NumberSequence.new({
-            NumberSequenceKeypoint.new(0, 0.74),
-            NumberSequenceKeypoint.new(0.5, 0.96),
-            NumberSequenceKeypoint.new(1, 0.74),
-        }),
-        Rotation = 90,
-    }, veil)
-
-    -- glow orbs
-    local orbs = {}
-    for i = 1, 3 do
-        local orb = create("Frame", {
-            AnchorPoint = Vector2.new(0.5, 0.5),
-            Position = UDim2.fromScale(0.5, 0.5),
-            Size = UDim2.fromOffset(140, 140),
-            BackgroundColor3 = (i % 2 == 0) and Theme.Accent or Theme.Accent2,
-            BackgroundTransparency = 0.84, BorderSizePixel = 0, ZIndex = 0,
-        }, clip)
-        addCorner(orb, 999)
-        table.insert(orbs, orb)
-    end
-
-    -- Expanding neon rings add a subtle premium radar effect.
     local rings = {}
-    for i = 1, 3 do
+    for i = 1, 4 do
         local ring = create("Frame", {
             AnchorPoint = Vector2.new(0.5, 0.5),
             Position = UDim2.fromScale(0.5, 0.5),
-            Size = UDim2.fromOffset(90 + i * 42, 90 + i * 42),
-            BackgroundTransparency = 1, BorderSizePixel = 0, ZIndex = 1,
+            Size = UDim2.fromOffset(60 + i * 30, 60 + i * 30),
+            BackgroundTransparency = 1,
+            BorderSizePixel = 0,
+            ZIndex = 2,
         }, clip)
         addCorner(ring, 999)
-        local stroke = addStroke(ring, i % 2 == 0 and Theme.Accent2 or Theme.Accent, 1.2, 0.6)
-        table.insert(rings, { frame = ring, stroke = stroke, phase = (i - 1) / 3 })
-    end
-
-    -- moving grid
-    local grid = create("Frame", {
-        Size = UDim2.new(1, 60, 1, 60), Position = UDim2.fromOffset(-30, -30),
-        BackgroundTransparency = 1, ZIndex = 0,
-    }, clip)
-    for i = 0, 9 do
-        create("Frame", {
-            Position = UDim2.new(i / 9, 0, 0, 0), Size = UDim2.new(0, 1, 1, 0),
-            BackgroundColor3 = Theme.Accent, BackgroundTransparency = 0.9, BorderSizePixel = 0, ZIndex = 0,
-        }, grid)
-    end
-    for i = 0, 11 do
-        create("Frame", {
-            Position = UDim2.new(0, 0, i / 11, 0), Size = UDim2.new(1, 0, 0, 1),
-            BackgroundColor3 = Theme.Accent2, BackgroundTransparency = 0.9, BorderSizePixel = 0, ZIndex = 0,
-        }, grid)
-    end
-
-    -- floating particles
-    local partLayer = create("Frame", { Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, ZIndex = 0 }, clip)
-    local function spawnParticle()
-        if not partLayer.Parent then return end
-        local size = math.random(2, 4)
-        local p = create("Frame", {
-            AnchorPoint = Vector2.new(0.5, 0.5),
-            Position = UDim2.fromScale(math.random(), 1.08),
-            Size = UDim2.fromOffset(size, size),
-            BackgroundColor3 = (math.random() < 0.5) and Theme.Accent or Theme.Accent2,
-            BackgroundTransparency = 0.15, BorderSizePixel = 0, ZIndex = 0,
-        }, partLayer)
-        addCorner(p, 999)
-        local dur = math.random(30, 70) / 10
-        TweenService:Create(p, TweenInfo.new(dur, Enum.EasingStyle.Linear), {
-            Position = UDim2.fromScale(math.clamp(p.Position.X.Scale + (math.random(-15, 15) / 100), 0, 1), -0.08),
-            BackgroundTransparency = 1,
-        }):Play()
-        task.delay(dur, function() pcall(function() p:Destroy() end) end)
-    end
-    for _ = 1, 14 do
-        task.delay(math.random() * 40 / 10, spawnParticle)
+        local stroke = addStroke(ring, i % 2 == 0 and Theme.Accent2 or Theme.Accent, 1.3, 0.5)
+        table.insert(rings, { frame = ring, stroke = stroke, phase = (i - 1) / 4 })
     end
 
     local tok = gateToken
     task.spawn(function()
         local t = 0
-        while parent.Parent and gateToken == tok and Runtime.alive do
+        while clip.Parent and Runtime.alive and gateToken == tok do
             t += 0.05
             pcall(function()
-                agrad.Rotation = (t * 12) % 360
-                grid.Position = UDim2.fromOffset(-30 + (t * 8) % 30, -30 + (t * 6) % 30)
-                for i, orb in ipairs(orbs) do
-                    orb.Position = UDim2.fromScale(
-                        0.5 + 0.35 * math.sin(t * (0.3 + i * 0.12) + i),
-                        0.5 + 0.35 * math.cos(t * (0.24 + i * 0.1) + i * 1.7))
-                end
                 for _, item in ipairs(rings) do
-                    local phase = (t * 0.12 + item.phase) % 1
-                    local diameter = 90 + phase * 300
+                    local phase = (t * 0.1 + item.phase) % 1
+                    local diameter = 60 + phase * 320
                     item.frame.Size = UDim2.fromOffset(diameter, diameter)
-                    item.stroke.Transparency = 0.18 + phase * 0.78
+                    item.stroke.Transparency = 0.15 + phase * 0.8
                 end
             end)
             task.wait(0.05)
         end
     end)
-    task.spawn(function()
-        while parent.Parent and gateToken == tok and Runtime.alive do
-            spawnParticle()
-            task.wait(0.22)
-        end
-    end)
+
     return clip
 end
 
@@ -6760,14 +6857,37 @@ local function buildGate()
 
     buildGateBackdrop(KeyFrame)
 
+    local gateGlass = create("Frame", {
+        Size = UDim2.fromScale(1, 1),
+        BackgroundColor3 = Theme.Glass,
+        BackgroundTransparency = 0.82,
+        BorderSizePixel = 0,
+        ZIndex = 3,
+    }, KeyFrame)
+    addCorner(gateGlass, 16)
+    local gateGlassGradient = create("UIGradient", {
+        Color = ColorSequence.new(Theme.GlassLight, Theme.Glass), Rotation = 90,
+    }, gateGlass)
+    task.spawn(function()
+        local t = 0
+        while KeyFrame.Parent and gateToken == 0 and Runtime.alive do
+            t += 0.02
+            pcall(function()
+                gateGlassGradient.Rotation = 90 + math.sin(t * 0.65) * 12
+                gateGlass.BackgroundTransparency = 0.79 + math.sin(t * 0.9) * 0.025
+            end)
+            task.wait(0.05)
+        end
+    end)
+
     create("TextLabel", {
         Position = UDim2.new(0, 0, 0, 14), Size = UDim2.new(1, 0, 0, 24),
-        BackgroundTransparency = 1, Text = "EKANTO // SECURE SHELL", TextSize = 16, ZIndex = 2,
+        BackgroundTransparency = 1, Text = "EKANTO // SECURE SHELL", TextSize = 16, ZIndex = 4,
     }, KeyFrame)
     local shellSub = create("TextLabel", {
         Position = UDim2.new(0, 0, 0, 38), Size = UDim2.new(1, 0, 0, 14),
-        BackgroundTransparency = 1, Text = "v2.3  •  PREMIUM ACCESS", TextSize = 10,
-        TextColor3 = Theme.TextFaint, ZIndex = 2,
+        BackgroundTransparency = 1, Text = "v2.4  •  AURORA PRIME", TextSize = 10,
+        TextColor3 = Theme.TextFaint, ZIndex = 4,
     }, KeyFrame)
     shellSub:SetAttribute("NoBoost", true)
 
@@ -6775,17 +6895,17 @@ local function buildGate()
         Position = UDim2.new(0, 14, 0, -2),
         Size = UDim2.new(1, -28, 0, 2),
         BackgroundColor3 = Theme.Accent, BackgroundTransparency = 0.5,
-        BorderSizePixel = 0, ZIndex = 3,
+        BorderSizePixel = 0, ZIndex = 5,
     }, KeyFrame)
     addCorner(scanline, 1)
 
     local bootHolder = create("Frame", {
         Position = UDim2.new(0, 26, 0, 62),
         Size = UDim2.new(1, -52, 0, 58),
-        BackgroundTransparency = 1, ZIndex = 2,
+        BackgroundTransparency = 1, ZIndex = 4,
     }, KeyFrame)
     local bootLines = {
-        "> EKANTO SECURE SHELL V2.3",
+        "> EKANTO SECURE SHELL V2.4",
         "> SWEPT COLLISION MODULE ... OK",
         "> AUTH REQUIRED // AWAITING KEY",
     }
@@ -6796,14 +6916,14 @@ local function buildGate()
         Size = UDim2.new(1, -52, 0, 14),
         BackgroundTransparency = 1, Text = "",
         TextSize = 10, TextColor3 = Theme.TextFaint,
-        TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 2,
+        TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 4,
     }, KeyFrame)
 
     local inputBox = create("Frame", {
         AnchorPoint = Vector2.new(0.5, 0),
         Position = UDim2.new(0.5, 0, 0, 130),
         Size = UDim2.new(1, -52, 0, 44),
-        BackgroundColor3 = Theme.Surface, BorderSizePixel = 0, Visible = false, ZIndex = 2,
+        BackgroundColor3 = Theme.Surface, BorderSizePixel = 0, Visible = false, ZIndex = 4,
     }, KeyFrame)
     addCorner(inputBox, 10)
     local inputStroke = addStroke(inputBox, Theme.Hairline, 1, 0.3)
@@ -6811,13 +6931,13 @@ local function buildGate()
         Size = UDim2.new(1, -60, 1, 0), Position = UDim2.fromOffset(14, 0),
         BackgroundTransparency = 1, Text = "",
         TextSize = 20, TextColor3 = Theme.Accent2,
-        TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 3,
+        TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5,
     }, inputBox)
     create("TextLabel", {
         AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -12, 0.5, 0),
         Size = UDim2.fromOffset(44, 16), BackgroundTransparency = 1,
         Text = "KEY", TextSize = 10, TextColor3 = Theme.TextFaint,
-        TextXAlignment = Enum.TextXAlignment.Right, ZIndex = 3,
+        TextXAlignment = Enum.TextXAlignment.Right, ZIndex = 5,
     }, inputBox)
 
     local hintLabel = create("TextLabel", {
@@ -6825,20 +6945,32 @@ local function buildGate()
         BackgroundTransparency = 1,
         Text = "keyboard or tap the keypad below",
         TextSize = 10, TextColor3 = Theme.TextFaint,
-        Visible = false, ZIndex = 2,
+        Visible = false, ZIndex = 4,
     }, KeyFrame)
     local statusLabel = create("TextLabel", {
         Position = UDim2.new(0, 0, 0, 196), Size = UDim2.new(1, 0, 0, 16),
         BackgroundTransparency = 1, Text = "",
-        TextSize = 13, TextColor3 = Theme.Accent, ZIndex = 2,
+        TextSize = 13, TextColor3 = Theme.Accent, ZIndex = 4,
     }, KeyFrame)
 
     local keypad = create("Frame", {
         AnchorPoint = Vector2.new(0.5, 0),
         Position = UDim2.new(0.5, 0, 0, 222),
         Size = UDim2.new(1, -52, 0, 154),
-        BackgroundTransparency = 1, Visible = false, Active = true, ZIndex = 2,
+        BackgroundTransparency = 1, Visible = false, Active = true, ZIndex = 4,
     }, KeyFrame)
+    local keypadSurface = create("Frame", {
+        AnchorPoint = Vector2.new(0.5, 0),
+        Position = UDim2.new(0.5, 0, 0, 216),
+        Size = UDim2.new(1, -40, 0, 170),
+        BackgroundColor3 = Theme.Inset, BackgroundTransparency = 0.18,
+        BorderSizePixel = 0, Visible = false, ZIndex = 3,
+    }, KeyFrame)
+    addCorner(keypadSurface, 13)
+    addStroke(keypadSurface, Theme.Hairline, 1, 0.45)
+    create("UIGradient", {
+        Color = ColorSequence.new(Theme.Inset, Theme.GlassLight), Rotation = 25,
+    }, keypadSurface)
     create("UIGridLayout", {
         CellSize = UDim2.new(1 / 3, -6, 0, 33),
         CellPadding = UDim2.fromOffset(7, 6),
@@ -6851,7 +6983,7 @@ local function buildGate()
         Position = UDim2.new(0.5, 0, 0, 386),
         Size = UDim2.new(1, -52, 0, 40),
         BackgroundColor3 = Theme.Surface, Text = "VERIFY",
-        TextSize = 16, AutoButtonColor = false, BorderSizePixel = 0, Visible = false, ZIndex = 2,
+        TextSize = 16, AutoButtonColor = false, BorderSizePixel = 0, Visible = false, ZIndex = 4,
     }, KeyFrame)
     addCorner(verifyBtn, 10)
     local vStroke = addStroke(verifyBtn, Theme.Accent, 1.2, 0)
@@ -6865,18 +6997,19 @@ local function buildGate()
     end))
 
     local padKeys = { "1","2","3","4","5","6","7","8","9","CLR","0","DEL" }
-    -- Declare handlers before wiring callbacks so keypad buttons never resolve
-    -- to accidental globals. This also keeps touch and mouse paths identical.
     local pushChar, backspace, clearAll
     for i, label in ipairs(padKeys) do
         local b = create("TextButton", {
             LayoutOrder = i, Text = label, TextSize = 15,
             BackgroundColor3 = Theme.Surface, AutoButtonColor = false, BorderSizePixel = 0,
             TextColor3 = (label == "CLR" or label == "DEL") and Theme.Accent2 or Theme.Text,
-            Active = true, Selectable = true, ZIndex = 3,
+            Active = true, Selectable = true, ZIndex = 5,
         }, keypad)
         addCorner(b, 9)
-        addStroke(b, Theme.Hairline, 1, 0.6)
+        local padStroke = addStroke(b, Theme.Hairline, 1, 0.6)
+        create("UIGradient", {
+            Color = ColorSequence.new(Theme.Surface2, Theme.Surface), Rotation = 90,
+        }, b)
         track(b.MouseEnter:Connect(function()
             TweenService:Create(b, HOVER_INFO, { BackgroundColor3 = Theme.Surface2 }):Play()
         end))
@@ -6886,9 +7019,17 @@ local function buildGate()
         track(b.InputBegan:Connect(function(input)
             if input.UserInputType ~= Enum.UserInputType.MouseButton1
                 and input.UserInputType ~= Enum.UserInputType.Touch then return end
+            TweenService:Create(b, TweenInfo.new(0.08), { BackgroundColor3 = Theme.Elevated }):Play()
+            TweenService:Create(padStroke, TweenInfo.new(0.08), { Color = Theme.Accent2, Transparency = 0.05 }):Play()
             if label == "CLR" then clearAll()
             elseif label == "DEL" then backspace()
             else pushChar(label) end
+        end))
+        track(b.InputEnded:Connect(function(input)
+            if input.UserInputType ~= Enum.UserInputType.MouseButton1
+                and input.UserInputType ~= Enum.UserInputType.Touch then return end
+            TweenService:Create(b, TweenInfo.new(0.16), { BackgroundColor3 = Theme.Surface }):Play()
+            TweenService:Create(padStroke, TweenInfo.new(0.16), { Color = Theme.Hairline, Transparency = 0.6 }):Play()
         end))
     end
 
@@ -6921,7 +7062,6 @@ local function buildGate()
         renderInput(true)
     end
 
-    -- animated glow border pulse
     task.spawn(function()
         local tok = gateToken
         local on = true
@@ -6975,7 +7115,7 @@ local function buildGate()
                 Position = UDim2.new(0, 0, 0, (i - 1) * 19),
                 Size = UDim2.new(1, 0, 0, 16),
                 BackgroundTransparency = 1, Text = "",
-                TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 3,
+                TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5,
                 TextColor3 = (i == #bootLines) and Theme.Accent2 or Theme.TextDim,
             }, bootHolder)
             for j = 1, #line do
@@ -6991,6 +7131,7 @@ local function buildGate()
             hintLabel.Visible = true
             verifyBtn.Visible = true
             keypad.Visible = true
+            keypadSurface.Visible = true
             statusLabel.Text = "AWAITING KEY..."
         end
     end)
