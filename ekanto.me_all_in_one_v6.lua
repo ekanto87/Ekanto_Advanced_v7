@@ -6956,7 +6956,7 @@ local function buildGate()
         AnchorPoint = Vector2.new(0.5, 0),
         Position = UDim2.new(0.5, 0, 0, 222),
         Size = UDim2.new(1, -52, 0, 154),
-        BackgroundTransparency = 1, Visible = false, ZIndex = 2,
+        BackgroundTransparency = 1, Visible = false, Active = true, ZIndex = 2,
     }, KeyFrame)
     create("UIGridLayout", {
         CellSize = UDim2.new(1 / 3, -6, 0, 33),
@@ -6984,11 +6984,15 @@ local function buildGate()
     end))
 
     local padKeys = { "1","2","3","4","5","6","7","8","9","CLR","0","DEL" }
+    -- Declare handlers before connecting callbacks so buttons never resolve
+    -- to accidental globals. The same path handles mouse and touch input.
+    local pushChar, backspace, clearAll
     for i, label in ipairs(padKeys) do
         local b = create("TextButton", {
             LayoutOrder = i, Text = label, TextSize = 15,
             BackgroundColor3 = Theme.Surface, AutoButtonColor = false, BorderSizePixel = 0,
-            TextColor3 = (label == "CLR" or label == "DEL") and Theme.Accent2 or Theme.Text, ZIndex = 3,
+            TextColor3 = (label == "CLR" or label == "DEL") and Theme.Accent2 or Theme.Text,
+            Active = true, Selectable = true, ZIndex = 3,
         }, keypad)
         addCorner(b, 9)
         addStroke(b, Theme.Hairline, 1, 0.6)
@@ -6998,7 +7002,9 @@ local function buildGate()
         track(b.MouseLeave:Connect(function()
             TweenService:Create(b, HOVER_INFO, { BackgroundColor3 = Theme.Surface }):Play()
         end))
-        track(b.MouseButton1Click:Connect(function()
+        track(b.InputBegan:Connect(function(input)
+            if input.UserInputType ~= Enum.UserInputType.MouseButton1
+                and input.UserInputType ~= Enum.UserInputType.Touch then return end
             if label == "CLR" then clearAll()
             elseif label == "DEL" then backspace()
             else pushChar(label) end
@@ -7016,19 +7022,19 @@ local function buildGate()
     end
     renderInput(true)
 
-    local function pushChar(c)
+    pushChar = function(c)
         if not inputReady or busy then return end
         if #buffer < MAX_LEN then
             buffer = buffer .. c
             renderInput(true)
         end
     end
-    local function backspace()
+    backspace = function()
         if not inputReady or busy then return end
         buffer = string.sub(buffer, 1, -2)
         renderInput(true)
     end
-    local function clearAll()
+    clearAll = function()
         if not inputReady or busy then return end
         buffer = ""
         renderInput(true)
